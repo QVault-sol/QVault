@@ -2,28 +2,30 @@
 
 [![CI](https://github.com/QVault-sol/QVault/actions/workflows/ci.yml/badge.svg)](https://github.com/QVault-sol/QVault/actions/workflows/ci.yml)
 
-**A quantum-safe vault for SOL and SPL tokens on Solana.**
+> ⚠️ **Not audited. Devnet only. Do not use real funds.**
 
-Every normal Solana wallet is protected by an Ed25519 key, and a large enough
-quantum computer could break it. On Solana the address *is* the public key, so
-every account is exposed by default.
+| | |
+|---|---|
+| **Live demo** | **[qvault-sol.github.io/QVault](https://qvault-sol.github.io/QVault/)** – Phantom on devnet or a built-in demo wallet, one-click guided demo |
+| **Devnet program id** | [`DwBtsKCpRjWyo3HmQ9U9twDLF3xya4Cs2Eoq7fQFLLLo`](https://explorer.solana.com/address/DwBtsKCpRjWyo3HmQ9U9twDLF3xya4Cs2Eoq7fQFLLLo?cluster=devnet) |
+| **Attack tests** | [`program/tests/e2e.rs`](https://github.com/QVault-sol/QVault/blob/main/program/tests/e2e.rs) – [signature forgery & tampering](https://github.com/QVault-sol/QVault/blob/main/program/tests/e2e.rs#L236), [undeliverable recipients](https://github.com/QVault-sol/QVault/blob/main/program/tests/e2e.rs#L254), [redirected payouts](https://github.com/QVault-sol/QVault/blob/main/program/tests/e2e.rs#L269), [token sweep theft](https://github.com/QVault-sol/QVault/blob/main/program/tests/e2e.rs#L338), [Token-2022](https://github.com/QVault-sol/QVault/blob/main/program/tests/e2e.rs#L378) |
+| **License** | MIT |
 
-QVault protects funds with **Winternitz one-time signatures** instead. They rely
-only on SHA-256 and are considered secure against quantum computers. Hash-based
-vaults already exist for SOL; QVault also covers **USDC and any SPL / Token-2022
-token**.
+**A quantum-safe vault for SOL, SPL and Token-2022 tokens on Solana.**
 
-> ⚠️ **Status: devnet prototype, not audited.** Do not store real funds.
-
-**▶ Try it in your browser: [qvault-sol.github.io/QVault](https://qvault-sol.github.io/QVault/)**
-Works with Phantom (devnet) or a built-in demo wallet. Create a vault, deposit SOL or
-test tokens, and send them with a hash-based signature computed in your browser.
+On Solana an address *is* its Ed25519 public key, so every account is exposed by
+default, and a large enough quantum computer could derive the private key from it.
+QVault keeps funds in a program-owned account (PDA) with no private key. Funds move
+only with a **Winternitz one-time signature** (SHA-256, no elliptic curves) that is
+verified on-chain. Hash-based vaults already exist for SOL; QVault puts **SOL and
+SPL / Token-2022 tokens in one vault**.
 
 | | Normal wallet | QVault |
 |---|---|---|
-| Signature | Ed25519 (quantum-vulnerable) | Winternitz / SHA-256 (quantum-safe) |
+| Signature | Ed25519 (quantum-vulnerable) | Winternitz / SHA-256 (hash-based) |
 | SOL | ✔ | ✔ |
-| USDC & other SPL tokens | ✔ | ✔ |
+| SPL tokens (e.g. USDC) | ✔ | ✔ |
+| Token-2022 | ✔ | ✔ (without transfer-changing extensions, see limits) |
 
 ---
 
@@ -162,30 +164,39 @@ Every step is visible in the explorer: https://explorer.solana.com/?cluster=devn
 
 ## What is tested
 
-`cargo test` runs a real Solana bank with the SPL Token program and checks:
+`cargo test` runs a real Solana bank with the SPL Token and Token-2022 programs ([source](https://github.com/QVault-sol/QVault/blob/main/program/tests/e2e.rs)):
 
 - **SOL flow** – open, deposit, commit, finish, fee exactly 0.1 %, remainder in
   the next vault; SOL arriving later still ends up in the next vault, no double payout
 - **Signature attacks** – amount increased, recipient swapped, remainder
   redirected, different mint, single bit flipped → all rejected
+- **Undeliverable recipients** – a program account or a dust amount to a new
+  account is rejected *before* the key is spent (found by the devnet browser test)
 - **Sweep / Finish attacks** – thief as recipient, next account or fee wallet →
   rejected; second commit with a spent key → rejected
-- **Token flow** – two different tokens in one vault, payout + fee + forwarding,
-  empty token accounts are closed
-- **Cross-check** – the Python client and the Rust program produce bit-identical signatures
+- **Token flow, SPL Token and Token-2022** – two different tokens in one vault,
+  payout + fee + forwarding, empty token accounts are closed
+- **Cross-check** – Rust program, Python client and browser JS produce bit-identical signatures
+
+On every push, CI runs these tests and builds the on-chain program. The
+[Devnet demo](.github/workflows/devnet-demo.yml) and [Web app](.github/workflows/web.yml)
+workflows deploy to devnet and drive the full SOL + token cycle through the CLI and a real browser.
 
 ---
 
-## Security notes and limitations
+## Security notes and known limits
 
-- **Prototype, not audited.** A professional security audit is required before
-  any mainnet use.
-- **Plain WOTS** (without the WOTS+ bitmasks). Safe for single use; WOTS+ or
-  multi-target hardening is planned.
-- **224-bit hash chains** give roughly 112-bit security against Grover's algorithm.
-- The **recovery code** is stored in plain text in `~/.qvault/wallet.json`
-  (mode 600). Production use needs keychain or hardware storage.
-- **Token-2022 transfer hooks** are not supported yet.
+- **Not audited.** A professional security audit is required before any mainnet use.
+  There is no mainnet deployment.
+- **Plain WOTS** (without the WOTS+ bitmasks), w = 256, 224-bit chains, roughly
+  112-bit security against Grover's algorithm. Safe for single use; WOTS+ is planned.
+- **Recovery code stored in plaintext.** The CLI keeps it in `~/.qvault/wallet.json`
+  (mode 600); the web app keeps it unencrypted in the browser's local storage.
+  Production use needs keychain or hardware storage.
+- **Token-2022 extensions.** Mints with transfer hooks, transfer fees, non-transferable
+  or other transfer-changing extensions are not supported: both clients refuse to
+  deposit them. Tokens sent to a vault address directly by other means could get stuck.
+- **Network fees** are still paid by a normal (Ed25519) wallet that only needs pocket change.
 - Each withdrawal leaves ~0.002 SOL rent in the old vault account, which serves
   as an immutable pointer to the next vault.
 

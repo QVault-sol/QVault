@@ -185,6 +185,21 @@ def ensure_open(rpc: Rpc, payer: Keypair, pid: Pubkey, key: qc.WotsKey, label: s
     return vault
 
 
+SAFE_2022_EXTENSIONS = {"metadataPointer", "tokenMetadata", "groupPointer", "groupMemberPointer",
+                        "tokenGroup", "tokenGroupMember", "mintCloseAuthority", "immutableOwner"}
+
+
+def assert_supported_mint(rpc: Rpc, mint: Pubkey, prog: Pubkey) -> None:
+    """Token-2022 extensions that change transfer behaviour would get stuck in a rotating vault."""
+    if prog != qc.TOKEN_2022_PROGRAM:
+        return
+    v = rpc.call("getAccountInfo", [str(mint), {"encoding": "jsonParsed", "commitment": "confirmed"}])["value"]
+    exts = (v or {}).get("data", {}).get("parsed", {}).get("info", {}).get("extensions", [])
+    bad = [e["extension"] for e in exts if e.get("extension") not in SAFE_2022_EXTENSIONS]
+    if bad:
+        die(f"This Token-2022 mint uses {', '.join(bad)}, which QVault does not support yet. Deposit refused.")
+
+
 def mint_info(rpc: Rpc, mint: Pubkey) -> tuple[int, Pubkey]:
     acc = rpc.account(mint)
     if acc is None or acc["owner"] not in (qc.TOKEN_PROGRAM, qc.TOKEN_2022_PROGRAM):
@@ -255,6 +270,7 @@ def cmd_deposit(a) -> None:
         return
     mint = Pubkey.from_string(a.token)
     dec, prog = mint_info(rpc, mint)
+    assert_supported_mint(rpc, mint, prog)
     units = to_base_units(a.amount, dec)
     src = qc.ata(payer.pubkey(), mint, prog)
     rpc.send(payer, [
