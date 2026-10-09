@@ -58,6 +58,13 @@ jobs:
           done
           BAL=$(solana balance --lamports | awk '{print $1}')
           if [ "$BAL" -lt "$NEED" ]; then
+            echo "Airdrops not enough – falling back to the proof-of-work devnet faucet"
+            cargo install devnet-pow --locked || cargo install devnet-pow
+            timeout 25m devnet-pow mine -d 3 --reward 0.02 --no-infer -t "$NEED" || true
+          fi
+          BAL=$(solana balance --lamports | awk '{print $1}')
+          echo "Fee payer $PAYER now has $BAL lamports"
+          if [ "$BAL" -lt "$NEED" ]; then
             echo "::error::Fee payer needs about 1.5 devnet SOL. Fund $PAYER at https://faucet.solana.com (Devnet) and re-run"
             exit 1
           fi
