@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QVault – quantum-safe vault on Solana</title>
+<meta name="description" content="Keep SOL and SPL tokens safe from quantum computers. Hash-based one-time signatures on Solana. Devnet demo.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23CBD3D8' stroke='%230F2A44' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%230F2A44'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="./">QVault</a>
+  <span class="net" title="Test network – no real money">Devnet</span>
+  <button id="wallet-btn" class="wallet-btn" type="button">Connect wallet</button>
+</header>
+
+<main>
+  <section class="intro">
+    <div class="intro-text">
+      <h1>Keep SOL and tokens safe from quantum computers.</h1>
+      <p>Every Solana address is a public key, visible to anyone. A large enough quantum computer could compute the private key behind it.
+      A QVault has no private key on-chain: it opens only with a hash-based one-time signature that your browser computes.</p>
+      <ol class="how">
+        <li><strong>Create a vault.</strong> Your browser generates a recovery code. It never leaves this device.</li>
+        <li><strong>Deposit</strong> SOL or any SPL token from your normal wallet.</li>
+        <li><strong>Send</strong> with a Winternitz signature. The rest moves to a fresh vault with a new key.</li>
+      </ol>
+    </div>
+    <svg id="door" class="door-svg" viewBox="0 0 240 240" role="img" aria-label="Vault door. Each of the 30 bolts shows one hash chain of your vault key."></svg>
+  </section>
+
+  <section id="connect" class="panel connect">
+    <h2>Connect a wallet to pay network fees</h2>
+    <p>Your wallet only pays the tiny devnet fees and funds deposits. Your savings sit in the vault.</p>
+    <div class="row">
+      <button id="phantom-btn" class="btn primary" type="button">Connect Phantom</button>
+      <button id="demo-btn" class="btn" type="button">Use a demo wallet in this browser</button>
+    </div>
+    <p id="phantom-hint" class="hint">Phantom not detected. The demo wallet works without any extension.</p>
+    <p class="hint">Using Phantom? Switch it to devnet: Settings → Developer Settings → Testnet Mode.</p>
+  </section>
+
+  <div id="app" hidden>
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <section class="panel exposure" aria-labelledby="exp-h">
+      <h2 id="exp-h">Quantum exposure</h2>
+      <div class="compare">
+        <div class="cmp bad">
+          <h3>Your wallet <code id="exposed-key"></code></h3>
+          <p>Ed25519 public key, published with every transaction. Breakable by a large quantum computer.</p>
+        </div>
+        <div class="cmp good">
+          <h3>Your vault</h3>
+          <p>Program account with no private key. Opens only with a SHA-256 based one-time signature.</p>
+        </div>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section class="panel" aria-labelledby="wallet-h">
+        <h2 id="wallet-h">Wallet <span id="wallet-kind" class="muted"></span></h2>
+        <p class="addr"><code id="wallet-addr"></code> <button id="copy-wallet" class="link" type="button">Copy</button></p>
+        <p class="big" id="wallet-sol">–</p>
+        <div class="row">
+          <button id="airdrop-btn" class="btn" type="button">Get devnet SOL</button>
+          <button id="mint-btn" class="btn" type="button">Get 1,000 test tokens</button>
+        </div>
+        <p class="hint">Airdrop busy? Paste the address into <a href="https://faucet.solana.com" target="_blank" rel="noopener">faucet.solana.com</a> (Devnet).</p>
+      </section>
+
+      <section class="panel" aria-labelledby="vault-h">
+        <h2 id="vault-h">Vault <span id="vault-index" class="muted"></span></h2>
+        <div id="no-vault">
+          <p>No vault in this browser yet.</p>
+          <div class="row">
+            <button id="create-btn" class="btn primary" type="button">Create vault</button>
+            <button id="restore-btn" class="btn" type="button">Restore from code</button>
+          </div>
+        </div>
+        <div id="vault" hidden>
+          <p class="addr"><code id="vault-addr"></code> <button id="copy-vault" class="link" type="button">Copy</button>
+            <a id="vault-link" target="_blank" rel="noopener">Explorer</a></p>
+          <p class="muted">State: <span id="vault-state"></span></p>
+          <table class="bal"><tbody id="balances"></tbody></table>
+          <button id="resume" class="btn primary" type="button" hidden>Finish withdrawal in progress</button>
+          <div class="row">
+            <button id="show-code" class="link" type="button">Show recovery code</button>
+            <button id="download-code" class="link" type="button">Download backup</button>
+          </div>
+          <div id="recovery" class="recovery" hidden>
+            <p id="recovery-fresh"><strong>Write this down.</strong> Whoever has this code controls the vault. It is stored only in this browser.</p>
+            <code id="recovery-code"></code>
+            <button id="hide-code" class="link" type="button">Hide</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="grid">
+      <section class="panel" aria-labelledby="dep-h">
+        <h2 id="dep-h">Deposit</h2>
+        <form id="dep-form">
+          <label for="dep-asset">Asset</label>
+          <select id="dep-asset"></select>
+          <label for="dep-amount">Amount</label>
+          <input id="dep-amount" inputmode="decimal" autocomplete="off" placeholder="0.5" required>
+          <button class="btn primary" type="submit">Deposit into vault</button>
+        </form>
+      </section>
+
+      <section class="panel" aria-labelledby="send-h">
+        <h2 id="send-h">Send quantum-safe</h2>
+        <form id="send-form">
+          <label for="send-asset">Asset</label>
+          <select id="send-asset"></select>
+          <label for="send-to">Recipient address</label>
+          <input id="send-to" autocomplete="off" spellcheck="false" placeholder="Solana address" required>
+          <label for="send-amount">Amount</label>
+          <input id="send-amount" inputmode="decimal" autocomplete="off" placeholder="0.1" required>
+          <p id="fee" class="hint">Fee: 0.1 % of the amount sent</p>
+          <button class="btn primary" type="submit">Sign and send</button>
+        </form>
+      </section>
+    </div>
+
+    <section class="panel" aria-labelledby="log-h">
+      <h2 id="log-h">Activity</h2>
+      <p id="log-empty" class="muted">Transactions you make appear here with explorer links.</p>
+      <ol id="log" class="log" aria-live="polite"></ol>
+    </section>
+  </div>
+</main>
+
+<footer class="foot">
+  <p>Devnet prototype, not audited. Do not use real funds.
+  <a href="https://github.com/QVault-sol/QVault" target="_blank" rel="noopener">Source on GitHub</a></p>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "qvault-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/app.js --bundle --minify --format=esm --target=es2020 --define:global=globalThis --inject:src/shims.js --outfile=public/app.js",
+    "test": "node test/core.test.js"
+  },
+  "dependencies": {
+    "@noble/hashes": "1.8.0",
+    "@solana/web3.js": "1.98.4",
+    "buffer": "6.0.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10"
+  }
+}
