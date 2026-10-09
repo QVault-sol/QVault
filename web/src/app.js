@@ -545,6 +545,8 @@ function bind() {
   $("send-amount").oninput = updateFee;
   $("send-asset").onchange = updateFee;
   $("phantom-hint").hidden = !!phantomProvider();
+  // Public RPC nodes index new token accounts with a short delay: refresh while idle.
+  setInterval(() => { if (S.wallet && !S.busy) refresh().catch(() => {}); }, 8000);
 }
 
 bind();

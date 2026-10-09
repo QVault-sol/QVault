@@ -41,7 +41,12 @@ def settle(pg, what, timeout=180_000):
 
 
 def select_containing(pg, sel, text):
-    value = pg.eval_on_selector(sel, "(s, t) => [...s.options].find(o => o.text.includes(t))?.value", text)
+    value = None
+    for _ in range(30):  # token accounts show up on public RPC with a short delay
+        value = pg.eval_on_selector(sel, "(s, t) => [...s.options].find(o => o.text.includes(t))?.value", text)
+        if value:
+            break
+        pg.wait_for_timeout(2000)
     if not value:
         fail(f"no option containing {text!r} in {sel}")
     pg.select_option(sel, value)
