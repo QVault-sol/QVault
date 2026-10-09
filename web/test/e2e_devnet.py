@@ -25,24 +25,30 @@ srv = subprocess.Popen([sys.executable, "-m", "http.server", "8765", "-d", str(P
 time.sleep(1)
 
 
+def fail(msg):
+    print("::error::" + msg.replace("\n", " "))
+    raise SystemExit(1)
+
+
 def settle(pg, what, timeout=180_000):
     pg.wait_for_function("!document.body.classList.contains('busy')", timeout=timeout)
     err = pg.locator("#error:not([hidden])")
     if err.count():
-        raise SystemExit(f"{what}: {err.inner_text()}")
+        fail(f"{what}: {err.inner_text()}")
     if pg.locator(".step.err").count():
-        raise SystemExit(f"{what}: {pg.locator('.step.err').first.inner_text()}")
-    print("✔", what)
+        fail(f"{what}: {pg.locator('.step.err').first.inner_text()}")
+    print(f"::notice::✔ {what}")
 
 
 def select_containing(pg, sel, text):
     value = pg.eval_on_selector(sel, "(s, t) => [...s.options].find(o => o.text.includes(t))?.value", text)
     if not value:
-        raise SystemExit(f"no option containing {text!r} in {sel}")
+        fail(f"no option containing {text!r} in {sel}")
     pg.select_option(sel, value)
 
 
 try:
+  try:
     with sync_playwright() as p:
         b = p.chromium.launch()
         pg = b.new_page(viewport={"width": 1280, "height": 900})
@@ -95,5 +101,9 @@ try:
                     text, href = l.rsplit(" | ", 1)
                     f.write(f"- [{text.strip()}]({href})\n")
         b.close()
+  except SystemExit:
+    raise
+  except Exception as e:  # surface unexpected errors as annotations
+    fail(f"{type(e).__name__}: {e}"[:900])
 finally:
     srv.terminate()
