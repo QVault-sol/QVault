@@ -101,6 +101,13 @@ class Rpc:
             raise RuntimeError(f"{method}: {res['error'].get('message')} {res['error'].get('data', '')}")
         return res["result"]
 
+    def explorer(self, sig: str) -> str:
+        cluster = next((c for c in ("devnet", "testnet") if c in self.url), None)
+        if cluster is None and "mainnet" not in self.url:
+            return sig
+        suffix = f"?cluster={cluster}" if cluster else ""
+        return f"https://explorer.solana.com/tx/{sig}{suffix}"
+
     def account(self, pk: Pubkey) -> dict | None:
         v = self.call("getAccountInfo", [str(pk), {"encoding": "base64", "commitment": "confirmed"}])["value"]
         if v is None:
@@ -146,7 +153,7 @@ class Rpc:
             if st and st.get("err"):
                 raise RuntimeError(f"{label} failed: {st['err']}")
             if st and st.get("confirmationStatus") in ("confirmed", "finalized"):
-                print(f"  ✔ {label}  ({sig[:20]}…)")
+                print(f"  ✔ {label}  {self.explorer(sig)}")
                 return sig
             time.sleep(1)
         raise RuntimeError(f"{label}: not confirmed after 60 s – check `status` later")
@@ -207,7 +214,7 @@ def cmd_init(a) -> None:
         print(f"✔ Recovered – current vault is #{i}")
     vault = ensure_open(rpc, payer, pid, qc.WotsKey(seed, w["index"]), "Vault opened")
     print("\n══════════════ RECOVERY CODE (write it down offline!) ══════════════")
-    print(seed.hex())
+    print("<hidden in CI>" if os.environ.get("CI") else seed.hex())
     print("═══════════════════════════════════════════════════════════════════")
     print("Whoever has this code controls the vault. It is never transmitted.\n")
     print(f"Vault address: {vault}")

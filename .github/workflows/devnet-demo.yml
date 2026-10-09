@@ -1,0 +1,100 @@
+name: Devnet demo
+
+# Manually triggered: deploys QVault to devnet and runs a full SOL + SPL-token
+# deposit/withdraw cycle. Explorer links appear in the run summary.
+#
+# Required repository secrets (JSON byte arrays, as written by `solana-keygen`):
+#   DEVNET_KEYPAIR          fee payer + upgrade authority + treasury (fund it with devnet SOL)
+#   DEVNET_PROGRAM_KEYPAIR  fixes the program id, so re-runs upgrade the same program
+
+on:
+  workflow_dispatch:
+
+concurrency: devnet-demo
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    env:
+      RPC: https://api.devnet.solana.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: |
+          pip install solders
+          rustup toolchain install stable --profile minimal && rustup default stable
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Load keypairs
+        env:
+          DEVNET_KEYPAIR: ${{ secrets.DEVNET_KEYPAIR }}
+          DEVNET_PROGRAM_KEYPAIR: ${{ secrets.DEVNET_PROGRAM_KEYPAIR }}
+        run: |
+          if [ -z "$DEVNET_KEYPAIR" ] || [ -z "$DEVNET_PROGRAM_KEYPAIR" ]; then
+            echo "::error::Secrets DEVNET_KEYPAIR and DEVNET_PROGRAM_KEYPAIR are required"; exit 1
+          fi
+          mkdir -p ~/.config/solana
+          printf '%s' "$DEVNET_KEYPAIR" > ~/.config/solana/id.json
+          printf '%s' "$DEVNET_PROGRAM_KEYPAIR" > program-keypair.json
+          solana config set --url "$RPC" >/dev/null
+          echo "PAYER=$(solana address)" >> "$GITHUB_ENV"
+          echo "PROGRAM_ID=$(solana address -k program-keypair.json)" >> "$GITHUB_ENV"
+
+      - name: Check balance
+        run: |
+          BAL=$(solana balance --lamports | awk '{print $1}')
+          echo "Fee payer $PAYER has $BAL lamports"
+          if [ "$BAL" -lt 2000000000 ]; then
+            echo "::error::Fee payer needs at least 2 devnet SOL. Fund $PAYER at https://faucet.solana.com (Devnet)"
+            exit 1
+          fi
+
+      - name: Build with devnet treasury
+        working-directory: program
+        run: |
+          sed -i "s/pub const TREASURY: Pubkey = pubkey!(\"[1-9A-HJ-NP-Za-km-z]*\");/pub const TREASURY: Pubkey = pubkey!(\"$PAYER\");/" src/lib.rs
+          grep -q "$PAYER" src/lib.rs
+          cargo build-sbf
+
+      - name: Deploy
+        run: |
+          solana program deploy program/target/deploy/qvault.so --program-id program-keypair.json
+          echo "### QVault on devnet" >> "$GITHUB_STEP_SUMMARY"
+          echo "Program: https://explorer.solana.com/address/$PROGRAM_ID?cluster=devnet" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: SOL round trip
+        working-directory: client
+        env:
+          QVAULT_HOME: ${{ runner.temp }}/qvault-sol
+        run: |
+          RECIPIENT=$(python3 -c "from solders.keypair import Keypair; print(Keypair().pubkey())")
+          {
+            python3 qvault.py init --program-id "$PROGRAM_ID" --treasury "$PAYER" --rpc "$RPC"
+            python3 qvault.py deposit 0.5
+            python3 qvault.py send "$RECIPIENT" 0.1
+            python3 qvault.py status
+          } 2>&1 | tee sol.log
+          echo "#### SOL: 0.5 deposited, 0.1 sent quantum-safe" >> "$GITHUB_STEP_SUMMARY"
+          grep -o 'https://explorer[^ ]*' sol.log | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: SPL token round trip
+        working-directory: client
+        env:
+          QVAULT_HOME: ${{ runner.temp }}/qvault-token
+        run: |
+          MINT=$(python3 make_test_token.py --rpc "$RPC" | tee token.log | tail -n 1)
+          RECIPIENT=$(python3 -c "from solders.keypair import Keypair; print(Keypair().pubkey())")
+          {
+            python3 qvault.py init --program-id "$PROGRAM_ID" --treasury "$PAYER" --rpc "$RPC"
+            python3 qvault.py deposit 100 --token "$MINT"
+            python3 qvault.py send "$RECIPIENT" 25 --token "$MINT"
+            python3 qvault.py status
+          } 2>&1 | tee -a token.log
+          echo "#### SPL token: 100 deposited, 25 sent quantum-safe" >> "$GITHUB_STEP_SUMMARY"
+          grep -o 'https://explorer[^ ]*' token.log | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"

@@ -1,5 +1,7 @@
 # QVault
 
+[![CI](https://github.com/QVault-sol/QVault/actions/workflows/ci.yml/badge.svg)](https://github.com/QVault-sol/QVault/actions/workflows/ci.yml)
+
 **A quantum-safe vault for SOL and SPL tokens on Solana.**
 
 Every normal Solana wallet is protected by an Ed25519 key, and a large enough
@@ -60,7 +62,11 @@ qvault/
 │   └── tests/e2e.rs         End-to-end tests incl. attack scenarios
 ├── client/
 │   ├── qvault_core.py       Winternitz crypto + instructions (bit-exact with Rust)
-│   └── qvault.py            CLI: init, deposit, send, status …
+│   ├── qvault.py            CLI: init, deposit, send, status …
+│   └── make_test_token.py   creates a throw-away SPL token on devnet
+├── .github/workflows/
+│   ├── ci.yml               tests + SBF build on every push
+│   └── devnet-demo.yml      one-click devnet deploy + SOL/token round trip
 └── README.md
 ```
 
