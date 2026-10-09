@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests + SBF build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python cross-check vector
+        run: |
+          pip install solders
+          python client/qvault_core.py
+          git diff --exit-code program/tests/vector.txt
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: program
+
+      - name: Run tests
+        working-directory: program
+        run: cargo test
+
+      - name: Install Solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Build on-chain program (SBF)
+        working-directory: program
+        run: cargo build-sbf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qvault-program
+          path: program/target/deploy/qvault.so
