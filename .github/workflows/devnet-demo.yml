@@ -46,12 +46,19 @@ jobs:
           echo "PAYER=$(solana address)" >> "$GITHUB_ENV"
           echo "PROGRAM_ID=$(solana address -k program-keypair.json)" >> "$GITHUB_ENV"
 
-      - name: Check balance
+      - name: Top up via airdrop (best effort) and check balance
         run: |
+          NEED=1500000000
+          for i in 1 2 3 4 5 6; do
+            BAL=$(solana balance --lamports | awk '{print $1}')
+            echo "Fee payer $PAYER has $BAL lamports"
+            [ "$BAL" -ge "$NEED" ] && break
+            solana airdrop 1 || echo "Airdrop refused (rate limit) – retrying"
+            sleep 15
+          done
           BAL=$(solana balance --lamports | awk '{print $1}')
-          echo "Fee payer $PAYER has $BAL lamports"
-          if [ "$BAL" -lt 2000000000 ]; then
-            echo "::error::Fee payer needs at least 2 devnet SOL. Fund $PAYER at https://faucet.solana.com (Devnet)"
+          if [ "$BAL" -lt "$NEED" ]; then
+            echo "::error::Fee payer needs about 1.5 devnet SOL. Fund $PAYER at https://faucet.solana.com (Devnet) and re-run"
             exit 1
           fi
 
@@ -76,11 +83,11 @@ jobs:
           RECIPIENT=$(python3 -c "from solders.keypair import Keypair; print(Keypair().pubkey())")
           {
             python3 qvault.py init --program-id "$PROGRAM_ID" --treasury "$PAYER" --rpc "$RPC"
-            python3 qvault.py deposit 0.5
-            python3 qvault.py send "$RECIPIENT" 0.1
+            python3 qvault.py deposit 0.2
+            python3 qvault.py send "$RECIPIENT" 0.05
             python3 qvault.py status
           } 2>&1 | tee sol.log
-          echo "#### SOL: 0.5 deposited, 0.1 sent quantum-safe" >> "$GITHUB_STEP_SUMMARY"
+          echo "#### SOL: 0.2 deposited, 0.05 sent quantum-safe" >> "$GITHUB_STEP_SUMMARY"
           grep -o 'https://explorer[^ ]*' sol.log | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
 
       - name: SPL token round trip
