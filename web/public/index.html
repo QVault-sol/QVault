@@ -38,11 +38,13 @@
       <button id="demo-btn" class="btn" type="button">Use a demo wallet in this browser</button>
     </div>
     <p id="phantom-hint" class="hint">Phantom not detected. The demo wallet works without any extension.</p>
-    <p class="hint">Using Phantom? Switch it to devnet: Settings → Developer Settings → Testnet Mode.</p>
+    <p class="hint">Using Phantom? Switch it to devnet: Settings → Developer Settings → Testnet Mode → Solana Devnet.
+    This page only ever talks to Solana devnet and refuses to run against mainnet.</p>
   </section>
 
+  <p id="error" class="error" role="alert" hidden></p>
+
   <div id="app" hidden>
-    <p id="error" class="error" role="alert" hidden></p>
 
     <section class="panel exposure" aria-labelledby="exp-h">
       <h2 id="exp-h">Quantum exposure</h2>
@@ -58,6 +60,14 @@
       </div>
     </section>
 
+    <section class="panel demo" aria-labelledby="demo-h">
+      <h2 id="demo-h">See it work in one click</h2>
+      <p>Creates a vault, deposits 0.05 SOL and 10 test tokens (qUSD, an SPL token), then withdraws 0.01 SOL and 2 qUSD
+      back to your wallet. Each withdrawal is authorised by a Winternitz signature computed here and verified on-chain.
+      Needs about 0.08 devnet SOL. With Phantom you approve each transaction.</p>
+      <button id="demo-run" class="btn primary" type="button">Run the full demo</button>
+    </section>
+
     <div class="grid">
       <section class="panel" aria-labelledby="wallet-h">
         <h2 id="wallet-h">Wallet <span id="wallet-kind" class="muted"></span></h2>
@@ -67,7 +77,13 @@
           <button id="airdrop-btn" class="btn" type="button">Get devnet SOL</button>
           <button id="mint-btn" class="btn" type="button">Get 1,000 test tokens</button>
         </div>
-        <p class="hint">Airdrop busy? Paste the address into <a href="https://faucet.solana.com" target="_blank" rel="noopener">faucet.solana.com</a> (Devnet).</p>
+        <div id="no-sol" class="warn" hidden>
+          <strong>This wallet has no devnet SOL yet.</strong>
+          Copy the address above and request devnet SOL at <a href="https://faucet.solana.com" target="_blank" rel="noopener">faucet.solana.com</a> (choose Devnet).
+          If you use Phantom and see a mainnet balance instead, Testnet Mode is off.
+        </div>
+        <p class="hint">Faucets: <a href="https://faucet.solana.com" target="_blank" rel="noopener">devnet SOL</a> ·
+          <a href="https://faucet.circle.com" target="_blank" rel="noopener">devnet USDC</a> (choose Solana Devnet). The test-token button needs no faucet.</p>
       </section>
 
       <section class="panel" aria-labelledby="vault-h">
@@ -90,7 +106,8 @@
             <button id="download-code" class="link" type="button">Download backup</button>
           </div>
           <div id="recovery" class="recovery" hidden>
-            <p id="recovery-fresh"><strong>Write this down.</strong> Whoever has this code controls the vault. It is stored only in this browser.</p>
+            <p id="recovery-fresh"><strong>Write this down.</strong> Whoever has this code controls the vault.</p>
+            <p class="hint">Known limit of this prototype: the code is kept unencrypted in this browser's local storage.</p>
             <code id="recovery-code"></code>
             <button id="hide-code" class="link" type="button">Hide</button>
           </div>
@@ -134,7 +151,7 @@
 </main>
 
 <footer class="foot">
-  <p>Devnet prototype, not audited. Do not use real funds.
+  <p><strong>Devnet prototype, not audited. Do not use real funds.</strong>
   <a href="https://github.com/QVault-sol/QVault" target="_blank" rel="noopener">Source on GitHub</a></p>
 </footer>
 

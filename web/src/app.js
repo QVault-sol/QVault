@@ -221,7 +221,20 @@ async function useDemoWallet() {
   await afterConnect();
 }
 
+const DEVNET_GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
+const MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
+let walletLamports = 0n;
+
+function requireFunds(minSol = 0.003) {
+  if (walletLamports < BigInt(Math.round(minSol * LAMPORTS_PER_SOL)))
+    throw new Error(`Your wallet needs at least ${minSol} devnet SOL for this. Get free devnet SOL at faucet.solana.com ` +
+      "(choose Devnet). Using Phantom? Turn on Settings → Developer Settings → Testnet Mode and pick Solana Devnet.");
+}
+
 async function afterConnect() {
+  const genesis = await conn.getGenesisHash();
+  if (genesis === MAINNET_GENESIS) throw new Error("This demo refuses to run on mainnet. Real funds must not be used.");
+  if (genesis !== DEVNET_GENESIS) throw new Error("The RPC endpoint is not Solana devnet – stopping.");
   $("wallet-btn").textContent = short(S.wallet.publicKey);
   $("wallet-kind").textContent = S.wallet.kind;
   $("wallet-addr").textContent = S.wallet.publicKey.toString();
@@ -284,30 +297,48 @@ async function restoreVault() {
   });
 }
 
+// Token-2022 extensions that change transfer behaviour would leave tokens stuck in a rotating vault.
+const SAFE_2022_EXTENSIONS = new Set(["metadataPointer", "tokenMetadata", "groupPointer", "groupMemberPointer",
+  "tokenGroup", "tokenGroupMember", "mintCloseAuthority", "immutableOwner"]);
+
+async function assertSupportedMint(mint, program) {
+  if (!program.equals(qc.TOKEN_2022_PROGRAM)) return;
+  const info = await conn.getParsedAccountInfo(mint, "confirmed");
+  const exts = info.value?.data?.parsed?.info?.extensions ?? [];
+  const bad = exts.map((e) => e.extension).filter((e) => !SAFE_2022_EXTENSIONS.has(e));
+  if (bad.length) throw new Error(`This Token-2022 mint uses ${bad.join(", ")}, which QVault does not support yet. Deposit refused so the tokens cannot get stuck.`);
+}
+
+async function depositCore(assetSel, amountStr) {
+  const vault = currentVault();
+  if (assetSel === "SOL") {
+    const lamports = parseUnits(amountStr, 9);
+    await sendTx([SystemProgram.transfer({ fromPubkey: S.wallet.publicKey, toPubkey: vault, lamports })],
+      `Depositing ${amountStr} SOL`);
+  } else {
+    const t = S.walletTokens.find((x) => x.address.toString() === assetSel);
+    if (!t) throw new Error("Pick a token from your wallet");
+    const units = parseUnits(amountStr, t.decimals);
+    if (units > t.amount) throw new Error("Your wallet does not hold that many tokens");
+    await assertSupportedMint(t.mint, t.program);
+    await sendTx([
+      qc.ixCreateAtaIdempotent(S.wallet.publicKey, vault, t.mint, t.program),
+      qc.ixTransferChecked(t.address, t.mint, qc.ata(vault, t.mint, t.program), S.wallet.publicKey, units, t.decimals, t.program),
+    ], `Depositing ${amountStr} ${tokenLabel(t.mint)}`);
+  }
+}
+
 async function deposit() {
   const assetSel = $("dep-asset").value;
   const amountStr = $("dep-amount").value;
   await run(async () => {
-    const vault = currentVault();
-    if (assetSel === "SOL") {
-      const lamports = parseUnits(amountStr, 9);
-      await sendTx([SystemProgram.transfer({ fromPubkey: S.wallet.publicKey, toPubkey: vault, lamports })],
-        `Depositing ${amountStr} SOL`);
-    } else {
-      const t = S.walletTokens.find((x) => x.address.toString() === assetSel);
-      const units = parseUnits(amountStr, t.decimals);
-      if (units > t.amount) throw new Error("Your wallet does not hold that many tokens");
-      await sendTx([
-        qc.ixCreateAtaIdempotent(S.wallet.publicKey, vault, t.mint, t.program),
-        qc.ixTransferChecked(t.address, t.mint, qc.ata(vault, t.mint, t.program), S.wallet.publicKey, units, t.decimals, t.program),
-      ], `Depositing ${amountStr} ${tokenLabel(t.mint)}`);
-    }
+    requireFunds();
+    await depositCore(assetSel, amountStr);
     $("dep-amount").value = "";
   });
 }
 
-async function withdraw(resumeOnly = false) {
-  await run(async () => {
+async function withdrawCore({ recipientStr, assetSel, amountStr, resumeOnly = false }) {
     const idx = S.index;
     const k = key(idx);
     const nextK = key(idx + 1);
@@ -320,15 +351,16 @@ async function withdraw(resumeOnly = false) {
       logStep("Signed withdrawal found on-chain – finishing it").done();
     } else {
       if (resumeOnly) return;
-      const recipient = new PublicKey($("send-to").value.trim());
-      const assetSel = $("send-asset").value;
+      let recipient;
+      try { recipient = new PublicKey(String(recipientStr).trim()); } catch { throw new Error("Recipient is not a valid Solana address"); }
       let mint = qc.SOL_MINT, decimals = 9;
       if (assetSel !== "SOL") {
         const t = S.vaultTokens.find((x) => x.mint.toString() === assetSel);
+        if (!t) throw new Error("That token is not in the vault");
         mint = t.mint;
         decimals = t.decimals;
       }
-      const amount = parseUnits($("send-amount").value, decimals);
+      const amount = parseUnits(amountStr, decimals);
       const fee = qc.feeFor(amount);
       const request = { index: idx, recipient: recipient.toString(), mint: mint.toString(), amount: amount.toString() };
       const pend = store.get("pending");
@@ -385,14 +417,20 @@ async function withdraw(resumeOnly = false) {
     S.index = idx + 1;
     store.set("index", S.index);
     store.set("pending", null);
-    $("send-amount").value = "";
     document.querySelector(".door")?.classList.add("rotate");
     logStep(`Done. Vault #${idx} is spent; your funds are in vault #${S.index} with a fresh key.`).done();
+}
+
+async function withdraw(resumeOnly = false) {
+  const args = { recipientStr: $("send-to").value, assetSel: $("send-asset").value, amountStr: $("send-amount").value, resumeOnly };
+  await run(async () => {
+    requireFunds();
+    await withdrawCore(args);
+    $("send-amount").value = "";
   });
 }
 
-async function mintTestTokens() {
-  await run(async () => {
+async function mintCore() {
     const me = S.wallet.publicKey;
     const stored = store.get("testMint");
     let mintPk = stored && stored.owner === me.toString() ? new PublicKey(stored.mint) : null;
@@ -411,6 +449,48 @@ async function mintTestTokens() {
     ixs.push(qc.ixCreateAtaIdempotent(me, me, mintPk), qc.ixMintTo(mintPk, qc.ata(me, mintPk), me, 1000n * 10n ** 6n));
     await sendTx(ixs, "Minting 1,000 qUSD test tokens to your wallet", signers);
     store.set("testMint", { owner: me.toString(), mint: mintPk.toString() });
+    return mintPk;
+}
+
+async function mintTestTokens() {
+  await run(async () => { requireFunds(); await mintCore(); });
+}
+
+// Public RPC lists new token accounts with a short delay.
+async function waitForToken(owner, mint, minAmount = 1n) {
+  for (let i = 0; i < 30; i++) {
+    const t = (await tokenAccounts(owner)).find((x) => x.mint.equals(mint) && x.amount >= minAmount);
+    if (t) return t;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  throw new Error("Token account did not show up on the devnet RPC – press the button again");
+}
+
+// One click for judges: SOL and an SPL token go in, and both come back out with hash signatures.
+async function guidedDemo() {
+  await run(async () => {
+    requireFunds(0.08);
+    const me = S.wallet.publicKey;
+    logStep("Guided demo: SOL + SPL token in, both out with Winternitz signatures").done();
+    if (!S.seed) {
+      S.seed = crypto.getRandomValues(new Uint8Array(32));
+      S.index = 0;
+      store.set("seed", qc.toHex(S.seed));
+      store.set("index", 0);
+      store.set("pending", null);
+    }
+    await ensureOpen(key(), "Opening your quantum-safe vault");
+    await depositCore("SOL", "0.05");
+    const mint = await mintCore();
+    const walletTok = await waitForToken(me, mint);
+    S.walletTokens = await tokenAccounts(me);
+    await depositCore(walletTok.address.toString(), "10");
+    await refresh();
+    await withdrawCore({ recipientStr: me.toString(), assetSel: "SOL", amountStr: "0.01" });
+    await waitForToken(currentVault(), mint);
+    await refresh();
+    await withdrawCore({ recipientStr: me.toString(), assetSel: mint.toString(), amountStr: "2" });
+    logStep("Guided demo complete: 0.01 SOL and 2 qUSD withdrawn to your wallet, rest rotated to a fresh vault.").done();
   });
 }
 
@@ -474,7 +554,9 @@ function option(value, text) {
 async function refresh() {
   if (!S.wallet) return;
   const solBal = BigInt(await conn.getBalance(S.wallet.publicKey, "confirmed"));
+  walletLamports = solBal;
   $("wallet-sol").textContent = fmtUnits(solBal, 9) + " SOL";
+  $("no-sol").hidden = solBal >= 10_000_000n;
   S.walletTokens = await tokenAccounts(S.wallet.publicKey);
   $("dep-asset").replaceChildren(option("SOL", `SOL (wallet: ${fmtUnits(solBal, 9)})`),
     ...S.walletTokens.filter((t) => t.amount > 0n).map((t) =>
@@ -549,6 +631,7 @@ function bind() {
   $("wallet-btn").onclick = () => { if (!S.wallet) $("connect").scrollIntoView({ behavior: "smooth" }); };
   $("airdrop-btn").onclick = () => run(airdrop);
   $("mint-btn").onclick = mintTestTokens;
+  $("demo-run").onclick = guidedDemo;
   $("create-btn").onclick = createVault;
   $("restore-btn").onclick = restoreVault;
   $("dep-form").onsubmit = (e) => { e.preventDefault(); deposit(); };

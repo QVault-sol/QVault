@@ -129,6 +129,9 @@ form .btn { margin-top: 10px; justify-self: start; }
 .cmp.bad h3 { color: var(--bad); }
 .cmp.good h3 { color: var(--good); }
 
+.warn { margin-top: 12px; padding: 12px 14px; border: 1.5px solid var(--brass); border-radius: var(--radius); background: #fff8ea; font-size: 15px; }
+.demo { border-color: var(--ink); }
+.demo p { max-width: 70ch; margin: 0 0 12px; }
 .error { background: #fbe9e6; color: var(--bad); border: 1.5px solid var(--bad); border-radius: var(--radius); padding: 12px 14px; }
 
 .log { list-style: none; margin: 0; padding: 0; }

@@ -91,7 +91,7 @@ fn ix_commit(pid: &Pubkey, vault: Pubkey, recipient: Pubkey, next: Pubkey, mint:
 }
 
 #[allow(clippy::too_many_arguments)]
-fn ix_sweep(pid: &Pubkey, vault: Pubkey, vault_tok: Pubkey, mint: Pubkey, next_tok: Pubkey, rcpt_tok: Pubkey, tres_tok: Pubkey) -> Instruction {
+fn ix_sweep(pid: &Pubkey, vault: Pubkey, vault_tok: Pubkey, mint: Pubkey, next_tok: Pubkey, rcpt_tok: Pubkey, tres_tok: Pubkey, tp: Pubkey) -> Instruction {
     Instruction {
         program_id: *pid,
         accounts: vec![
@@ -101,7 +101,7 @@ fn ix_sweep(pid: &Pubkey, vault: Pubkey, vault_tok: Pubkey, mint: Pubkey, next_t
             AccountMeta::new(next_tok, false),
             AccountMeta::new(rcpt_tok, false),
             AccountMeta::new(tres_tok, false),
-            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+            AccountMeta::new_readonly(tp, false),
         ],
         data: vec![2u8],
     }
@@ -153,7 +153,7 @@ async fn start() -> (ProgramTestContext, Pubkey) {
     (ctx, pid)
 }
 
-async fn create_mint(ctx: &mut ProgramTestContext, decimals: u8) -> Pubkey {
+async fn create_mint(ctx: &mut ProgramTestContext, decimals: u8, tp: Pubkey) -> Pubkey {
     let mint = Keypair::new();
     let rent = Rent::default().minimum_balance(82);
     let payer = ctx.payer.pubkey();
@@ -162,39 +162,39 @@ async fn create_mint(ctx: &mut ProgramTestContext, decimals: u8) -> Pubkey {
     data.push(0); // no freeze authority
     data.extend_from_slice(&[0u8; 32]);
     let init = Instruction {
-        program_id: TOKEN_PROGRAM,
+        program_id: tp,
         accounts: vec![AccountMeta::new(mint.pubkey(), false)],
         data,
     };
-    send(ctx, &[sys::create_account(&payer, &mint.pubkey(), rent, 82, &TOKEN_PROGRAM), init], &[&mint])
+    send(ctx, &[sys::create_account(&payer, &mint.pubkey(), rent, 82, &tp), init], &[&mint])
         .await
         .unwrap();
     mint.pubkey()
 }
 
-async fn create_token_account(ctx: &mut ProgramTestContext, mint: &Pubkey, owner: &Pubkey) -> Pubkey {
+async fn create_token_account(ctx: &mut ProgramTestContext, mint: &Pubkey, owner: &Pubkey, tp: Pubkey) -> Pubkey {
     let acc = Keypair::new();
     let rent = Rent::default().minimum_balance(165);
     let payer = ctx.payer.pubkey();
     let mut data = vec![18u8]; // InitializeAccount3
     data.extend_from_slice(owner.as_ref());
     let init = Instruction {
-        program_id: TOKEN_PROGRAM,
+        program_id: tp,
         accounts: vec![AccountMeta::new(acc.pubkey(), false), AccountMeta::new_readonly(*mint, false)],
         data,
     };
-    send(ctx, &[sys::create_account(&payer, &acc.pubkey(), rent, 165, &TOKEN_PROGRAM), init], &[&acc])
+    send(ctx, &[sys::create_account(&payer, &acc.pubkey(), rent, 165, &tp), init], &[&acc])
         .await
         .unwrap();
     acc.pubkey()
 }
 
-async fn mint_to(ctx: &mut ProgramTestContext, mint: &Pubkey, dest: &Pubkey, amount: u64) {
+async fn mint_to(ctx: &mut ProgramTestContext, mint: &Pubkey, dest: &Pubkey, amount: u64, tp: Pubkey) {
     let mut data = vec![7u8]; // MintTo
     data.extend_from_slice(&amount.to_le_bytes());
     let payer = ctx.payer.pubkey();
     let ix = Instruction {
-        program_id: TOKEN_PROGRAM,
+        program_id: tp,
         accounts: vec![
             AccountMeta::new(*mint, false),
             AccountMeta::new(*dest, false),
@@ -299,8 +299,7 @@ async fn sol_flow_and_attacks() {
     assert_eq!(err_code(e), Some(QvError::InsufficientFunds as u32));
 }
 
-#[tokio::test]
-async fn token_flow() {
+async fn token_flow_with(tp: Pubkey) {
     let (mut ctx, pid) = start().await;
     let payer = ctx.payer.pubkey();
     let keep = Rent::default().minimum_balance(STATE_LEN);
@@ -311,23 +310,23 @@ async fn token_flow() {
     send(&mut ctx, &[ix_open(&pid, &payer, &k0), ix_open(&pid, &payer, &k1)], &[]).await.unwrap();
 
     // Two tokens in the vault: "USDC" (6 decimals) and a second token
-    let usdc = create_mint(&mut ctx, 6).await;
-    let other = create_mint(&mut ctx, 9).await;
-    let v0_usdc = create_token_account(&mut ctx, &usdc, &v0).await;
-    let v0_other = create_token_account(&mut ctx, &other, &v0).await;
-    mint_to(&mut ctx, &usdc, &v0_usdc, 1_000_000_000).await; // 1000 USDC
-    mint_to(&mut ctx, &other, &v0_other, 50).await;
+    let usdc = create_mint(&mut ctx, 6, tp).await;
+    let other = create_mint(&mut ctx, 9, tp).await;
+    let v0_usdc = create_token_account(&mut ctx, &usdc, &v0, tp).await;
+    let v0_other = create_token_account(&mut ctx, &other, &v0, tp).await;
+    mint_to(&mut ctx, &usdc, &v0_usdc, 1_000_000_000, tp).await; // 1000 USDC
+    mint_to(&mut ctx, &other, &v0_other, 50, tp).await;
 
     let recipient = Keypair::new().pubkey();
-    let r_usdc = create_token_account(&mut ctx, &usdc, &recipient).await;
-    let t_usdc = create_token_account(&mut ctx, &usdc, &TREASURY).await;
-    let v1_usdc = create_token_account(&mut ctx, &usdc, &v1).await;
-    let v1_other = create_token_account(&mut ctx, &other, &v1).await;
+    let r_usdc = create_token_account(&mut ctx, &usdc, &recipient, tp).await;
+    let t_usdc = create_token_account(&mut ctx, &usdc, &TREASURY, tp).await;
+    let v1_usdc = create_token_account(&mut ctx, &usdc, &v1, tp).await;
+    let v1_other = create_token_account(&mut ctx, &other, &v1, tp).await;
     let thief = Keypair::new().pubkey();
-    let thief_usdc = create_token_account(&mut ctx, &usdc, &thief).await;
+    let thief_usdc = create_token_account(&mut ctx, &usdc, &thief, tp).await;
 
     // Sweep before Commit is rejected
-    let e = send(&mut ctx, &[ix_sweep(&pid, v0, v0_usdc, usdc, v1_usdc, r_usdc, t_usdc)], &[])
+    let e = send(&mut ctx, &[ix_sweep(&pid, v0, v0_usdc, usdc, v1_usdc, r_usdc, t_usdc, tp)], &[])
         .await
         .unwrap_err();
     assert_eq!(err_code(e), Some(QvError::BadState as u32));
@@ -338,23 +337,23 @@ async fn token_flow() {
 
     // Attacks on Sweep: thief as recipient / next account / treasury
     for bad in [
-        ix_sweep(&pid, v0, v0_usdc, usdc, v1_usdc, thief_usdc, t_usdc),
-        ix_sweep(&pid, v0, v0_usdc, usdc, thief_usdc, r_usdc, t_usdc),
-        ix_sweep(&pid, v0, v0_usdc, usdc, v1_usdc, r_usdc, thief_usdc),
+        ix_sweep(&pid, v0, v0_usdc, usdc, v1_usdc, thief_usdc, t_usdc, tp),
+        ix_sweep(&pid, v0, v0_usdc, usdc, thief_usdc, r_usdc, t_usdc, tp),
+        ix_sweep(&pid, v0, v0_usdc, usdc, v1_usdc, r_usdc, thief_usdc, tp),
     ] {
         let e = send(&mut ctx, &[bad], &[]).await.unwrap_err();
         assert_eq!(err_code(e), Some(QvError::WrongDestination as u32));
     }
 
     // Other token: everything into the next vault
-    send(&mut ctx, &[ix_sweep(&pid, v0, v0_other, other, v1_other, v1_other, v1_other)], &[])
+    send(&mut ctx, &[ix_sweep(&pid, v0, v0_other, other, v1_other, v1_other, v1_other, tp)], &[])
         .await
         .unwrap();
     assert_eq!(token_balance(&mut ctx, &v1_other).await, Some(50));
     assert_eq!(token_balance(&mut ctx, &v0_other).await, None); // closed
 
     // USDC: recipient + fee + remainder
-    send(&mut ctx, &[ix_sweep(&pid, v0, v0_usdc, usdc, v1_usdc, r_usdc, t_usdc)], &[])
+    send(&mut ctx, &[ix_sweep(&pid, v0, v0_usdc, usdc, v1_usdc, r_usdc, t_usdc, tp)], &[])
         .await
         .unwrap();
     assert_eq!(token_balance(&mut ctx, &r_usdc).await, Some(amount));
@@ -368,6 +367,16 @@ async fn token_flow() {
     assert_eq!(lamports(&mut ctx, &v0).await, keep);
     assert_eq!(lamports(&mut ctx, &v1).await - before, 2 * Rent::default().minimum_balance(165));
     assert_eq!(lamports(&mut ctx, &recipient).await, 0); // token withdrawal: no SOL
+}
+
+#[tokio::test]
+async fn token_flow() {
+    token_flow_with(TOKEN_PROGRAM).await;
+}
+
+#[tokio::test]
+async fn token_2022_flow() {
+    token_flow_with(TOKEN_2022_PROGRAM).await;
 }
 
 /// Cross-check against a test vector generated by the Python client.

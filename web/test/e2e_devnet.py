@@ -97,6 +97,22 @@ try:
         pg.wait_for_timeout(1500)
         pg.screenshot(path=SHOTS / "3-after-sends.png", full_page=True)
 
+        # The judge path: a fresh browser, one click on "Run the full demo".
+        ctx2 = b.new_context(viewport={"width": 1280, "height": 900})
+        pg2 = ctx2.new_page()
+        pg2.on("pageerror", lambda e: print("pageerror:", e))
+        pg2.add_init_script(f"localStorage.setItem('qvault.burner', {json.dumps(json.dumps(KEY))})")
+        pg2.goto("http://localhost:8765/")
+        pg2.click("#demo-btn")
+        pg2.wait_for_selector("#app:not([hidden])")
+        settle(pg2, "guided demo: wallet connected")
+        pg2.click("#demo-run")
+        settle(pg2, "guided demo: SOL + qUSD in and out", timeout=600_000)
+        if "Guided demo complete" not in pg2.inner_text("#log"):
+            fail("guided demo did not report completion")
+        pg2.screenshot(path=SHOTS / "4-guided-demo.png", full_page=True)
+        ctx2.close()
+
         links = pg.eval_on_selector_all(".step a", "as => as.map(a => a.closest('li').innerText.split('\\n')[0] + ' | ' + a.href)")
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:
