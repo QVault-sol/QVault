@@ -15,6 +15,10 @@ token**.
 
 > ⚠️ **Status: devnet prototype, not audited.** Do not store real funds.
 
+**▶ Try it in your browser: [qvault-sol.github.io/QVault](https://qvault-sol.github.io/QVault/)**
+Works with Phantom (devnet) or a built-in demo wallet. Create a vault, deposit SOL or
+test tokens, and send them with a hash-based signature computed in your browser.
+
 | | Normal wallet | QVault |
 |---|---|---|
 | Signature | Ed25519 (quantum-vulnerable) | Winternitz / SHA-256 (quantum-safe) |
@@ -60,6 +64,9 @@ qvault/
 ├── program/                 Solana program (Rust)
 │   ├── src/lib.rs           Open / Commit / SweepToken / Finish
 │   └── tests/e2e.rs         End-to-end tests incl. attack scenarios
+├── web/                     Browser app (Phantom or demo wallet), deployed to GitHub Pages
+│   ├── src/core.js          Winternitz signing in JS (cross-checked against Rust/Python)
+│   └── test/e2e_devnet.py   Browser test of the full flow on devnet
 ├── client/
 │   ├── qvault_core.py       Winternitz crypto + instructions (bit-exact with Rust)
 │   ├── qvault.py            CLI: init, deposit, send, status …
