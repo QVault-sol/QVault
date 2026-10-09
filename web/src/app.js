@@ -17,7 +17,17 @@ const CONFIG = {
   treasury: new PublicKey("GcDnFhLESFBYmyGfq5L9bTgf1aAuiV7tZdk3cH2G5LPD"),
   explorer: (kind, id) => `https://explorer.solana.com/${kind}/${id}?cluster=devnet`,
 };
-const conn = new Connection(CONFIG.rpc, "confirmed");
+// Public devnet RPC rate-limits bursts (HTTP 429): back off and retry instead of failing.
+async function patientFetch(url, init) {
+  let res;
+  for (let i = 0; i < 7; i++) {
+    res = await fetch(url, init);
+    if (res.status !== 429) return res;
+    await new Promise((r) => setTimeout(r, 600 * 2 ** i + Math.random() * 400));
+  }
+  return res;
+}
+const conn = new Connection(CONFIG.rpc, { commitment: "confirmed", fetch: patientFetch, disableRetryOnRateLimit: true });
 const PID = CONFIG.programId;
 
 // ───────────── storage (per browser) ─────────────
@@ -138,9 +148,9 @@ async function waitFor(sig, lastValidBlockHeight) {
     if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) return;
     if (i % 5 === 4 && lastValidBlockHeight && (await conn.getBlockHeight("confirmed")) > lastValidBlockHeight)
       throw new Error("Transaction expired before it landed. Please try again.");
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1500));
   }
-  throw new Error("Not confirmed after 90 s – check the activity link later");
+  throw new Error("Not confirmed after 2 min – check the activity link later");
 }
 
 async function vaultState(vault) {
@@ -546,7 +556,7 @@ function bind() {
   $("send-asset").onchange = updateFee;
   $("phantom-hint").hidden = !!phantomProvider();
   // Public RPC nodes index new token accounts with a short delay: refresh while idle.
-  setInterval(() => { if (S.wallet && !S.busy) refresh().catch(() => {}); }, 8000);
+  setInterval(() => { if (S.wallet && !S.busy) refresh().catch(() => {}); }, 15000);
 }
 
 bind();
