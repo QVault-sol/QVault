@@ -124,6 +124,7 @@ pub enum QvError {
     BadState = 5,
     WrongDestination = 6,
     BadTokenAccount = 7,
+    BadRecipient = 8,
 }
 
 impl From<QvError> for ProgramError {
@@ -325,6 +326,16 @@ fn commit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Program
     }
     if vault.key == next_vault.key || vault.key == recipient.key {
         return Err(QvError::SameAccount.into());
+    }
+    // A SOL payout must be able to land, otherwise the rotating vault could never finish:
+    // executable accounts cannot be credited, and a new account needs the rent-exempt minimum.
+    if mint == Pubkey::default()
+        && amount > 0
+        && (recipient.executable
+            || (recipient.lamports() == 0 && amount < Rent::default().minimum_balance(0)))
+    {
+        msg!("Recipient cannot receive this SOL payout");
+        return Err(QvError::BadRecipient.into());
     }
 
     let digest = message_digest(program_id, vault.key, recipient.key, next_vault.key, &mint, amount);

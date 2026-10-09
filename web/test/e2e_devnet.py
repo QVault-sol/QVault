@@ -18,7 +18,6 @@ PUBLIC = HERE.parent / "public"
 SHOTS = HERE / "screens"
 SHOTS.mkdir(exist_ok=True)
 KEY = json.loads(os.environ["DEVNET_KEYPAIR"])
-RECIPIENT = "Vote111111111111111111111111111111111111111"  # any existing account works as a demo recipient
 
 srv = subprocess.Popen([sys.executable, "-m", "http.server", "8765", "-d", str(PUBLIC)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -83,6 +82,7 @@ try:
         settle(pg, "deposited 10 qUSD")
         pg.screenshot(path=SHOTS / "2-funded-vault.png", full_page=True)
 
+        RECIPIENT = pg.inner_text("#wallet-addr").strip()  # withdraw back to the wallet
         select_containing(pg, "#send-asset", "SOL")
         pg.fill("#send-to", RECIPIENT)
         pg.fill("#send-amount", "0.01")

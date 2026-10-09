@@ -77,7 +77,7 @@ const ERRORS = {
   0: "Malformed instruction", 1: "Account is not a QVault vault", 2: "Signature does not match this vault",
   3: "Not enough funds in the vault (amount + 0.1 % fee)", 4: "Recipient cannot be the vault itself",
   5: "Vault is in the wrong state for this step", 6: "Destination does not match the signed withdrawal",
-  7: "Unsupported token account",
+  7: "Unsupported token account", 8: "That recipient cannot receive this SOL payout",
 };
 function explainError(e) {
   const m = String(e?.message || e);
@@ -340,6 +340,7 @@ async function withdraw(resumeOnly = false) {
         const excess = st.lamports - S.rentKeep;
         if (excess < amount + fee) throw new Error(`Not enough SOL: the vault holds ${fmtUnits(excess, 9)}, you need ${fmtUnits(amount + fee, 9)} incl. fee`);
         const rcpt = await conn.getAccountInfo(recipient);
+        if (rcpt?.executable) throw new Error("That address is a program and cannot receive SOL");
         if (!rcpt && amount < BigInt(await conn.getMinimumBalanceForRentExemption(0)))
           throw new Error("New recipient accounts need at least 0.00089 SOL");
       } else {
@@ -352,9 +353,15 @@ async function withdraw(resumeOnly = false) {
       const sig = k.sign(qc.messageDigest(PID, vault, recipient, nextVault, mint, amount));
       s1.done();
       store.set("pending", request); // from here on this key counts as used
-      await sendTx([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
-        qc.ixCommit(PID, vault, recipient, nextVault, mint, amount, sig)],
-        "Quantum-safe commit: verifying 840-byte hash signature on-chain");
+      try {
+        await sendTx([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+          qc.ixCommit(PID, vault, recipient, nextVault, mint, amount, sig)],
+          "Quantum-safe commit: verifying 840-byte hash signature on-chain");
+      } catch (e) {
+        // Rejected in simulation = never broadcast, so the signature stayed private.
+        if (/Simulation failed|simulation failed/.test(String(e?.message))) store.set("pending", null);
+        throw e;
+      }
       st = await vaultState(vault);
     }
 

@@ -296,7 +296,10 @@ def cmd_send(a) -> None:
             excess = st["lamports"] - rpc.rent(qc.STATE_LEN)
             if excess < amount + fee:
                 die(f"Not enough SOL in the vault: {fmt(excess, 9)} < {fmt(amount + fee, 9)} (incl. 0.1 % fee)")
-            if rpc.account(recipient) is None and amount < rpc.rent(0):
+            rcpt_acc = rpc.call("getAccountInfo", [str(recipient), {"encoding": "base64"}])["value"]
+            if rcpt_acc and rcpt_acc.get("executable"):
+                die("That address is a program and cannot receive SOL")
+            if rcpt_acc is None and amount < rpc.rent(0):
                 die("Recipient account does not exist yet – minimum amount is ~0.00089 SOL")
         else:
             bal = sum(t["amount"] for t in rpc.token_accounts(vault) if t["mint"] == mint)
@@ -309,9 +312,15 @@ def cmd_send(a) -> None:
         sig = key.sign(qc.message_digest(pid, vault, recipient, next_vault, mint, amount))
         w["pending"] = request
         save_wallet(w)  # persist before sending: from now on this key counts as used
-        rpc.send(payer, [set_compute_unit_limit(COMMIT_CU),
-                         qc.ix_commit(pid, vault, recipient, next_vault, mint, amount, sig)],
-                 "Quantum-safe commit (Winternitz)")
+        try:
+            rpc.send(payer, [set_compute_unit_limit(COMMIT_CU),
+                             qc.ix_commit(pid, vault, recipient, next_vault, mint, amount, sig)],
+                     "Quantum-safe commit (Winternitz)")
+        except RuntimeError as e:
+            if str(e).startswith("sendTransaction:"):  # rejected in preflight: never broadcast
+                w["pending"] = None
+                save_wallet(w)
+            raise
         st = vault_state(rpc, pid, vault)
 
     # No signature needed from here on: sweep tokens, then SOL

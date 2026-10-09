@@ -251,6 +251,16 @@ async fn sol_flow_and_attacks() {
         assert_eq!(err_code(e), Some(QvError::BadSignature as u32));
     }
 
+    // Recipients that could never receive the SOL are rejected before the key is spent
+    let sys_prog = system_program::ID;
+    let s_exec = k0.sign(&message_digest(&pid, &v0, &sys_prog, &v1, &sol, amount));
+    let e = send(&mut ctx, &[ix_commit(&pid, v0, sys_prog, v1, sol, amount, &s_exec)], &[]).await.unwrap_err();
+    assert_eq!(err_code(e), Some(QvError::BadRecipient as u32));
+    let fresh = Keypair::new().pubkey();
+    let s_dust = k0.sign(&message_digest(&pid, &v0, &fresh, &v1, &sol, 1_000));
+    let e = send(&mut ctx, &[ix_commit(&pid, v0, fresh, v1, sol, 1_000, &s_dust)], &[]).await.unwrap_err();
+    assert_eq!(err_code(e), Some(QvError::BadRecipient as u32));
+
     // Valid commit, then no second one possible
     send(&mut ctx, &[ix_commit(&pid, v0, recipient, v1, sol, amount, &sig)], &[]).await.unwrap();
     let e = send(&mut ctx, &[ix_commit(&pid, v0, recipient, v1, sol, amount, &sig)], &[]).await.unwrap_err();
