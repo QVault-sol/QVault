@@ -371,12 +371,77 @@ def mux(video: Path, cues, out: Path):
         for sid, _, _ in cues:
             cmd += ["-i", str(AUDIO / f"{sid}.wav")]
         parts = [f"[{i + 1}:a]aresample=48000,adelay={int(a * 1000)}:all=1[a{i}]" for i, (_, a, _) in enumerate(cues)]
-        mix = "".join(f"[a{i}]" for i in range(len(cues))) + f"amix=inputs={len(cues)}:normalize=0:duration=longest[aout]"
-        cmd += ["-filter_complex", ";".join(parts + [mix]), "-map", "0:v", "-map", "[aout]", "-c:a", "aac", "-b:a", "160k"]
+        mix = ("".join(f"[a{i}]" for i in range(len(cues))) + f"amix=inputs={len(cues)}:normalize=0:duration=longest,"
+               "apad,loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
+        cmd += ["-filter_complex", ";".join(parts + [mix]), "-map", "0:v", "-map", "[aout]", "-shortest", "-c:a", "aac", "-b:a", "160k"]
     else:
-        cmd += ["-map", "0:v", "-an"]
+        cmd += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-map", "0:v", "-map", "1:a", "-shortest", "-c:a", "aac"]
     cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out)]
     subprocess.run(cmd, check=True)
+
+
+def duration(path: Path) -> float:
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+                         capture_output=True, text=True).stdout.strip()
+    return float(out or 0)
+
+
+def plan(cues, total: float, min_gap: float = 3.0, keep: float = 0.8, speed: float = 6.0):
+    """Segments (start, end, factor): stretches without narration play at `speed`x,
+    keeping `keep` seconds of real time at both ends so the motion stays readable."""
+    spans = sorted((a, b) for _, a, b in cues)
+    segs, t = [], 0.0
+    for a, b in spans + [(total, total)]:
+        if a - t > min_gap:
+            segs += [(t, t + keep, 1.0), (t + keep, a - keep, speed), (a - keep, a, 1.0)]
+        elif a > t:
+            segs.append((t, a, 1.0))
+        if b > a:
+            segs.append((a, min(b, total), 1.0))
+        t = max(t, b)
+    return [(x, y, f) for x, y, f in segs if y - x > 0.05]
+
+
+def remap(t: float, segs) -> float:
+    out = 0.0
+    for a, b, f in segs:
+        if t >= b:
+            out += (b - a) / f
+        else:
+            return out + max(0.0, t - a) / f
+    return out
+
+
+def tighten(src: Path, cues, dst: Path):
+    """Speeds up silent waiting for the blockchain; returns cues on the new timeline.
+
+    Each segment is encoded on its own and joined with the concat demuxer, which keeps memory low."""
+    segs = []
+    for a, b, f in plan(cues, duration(src)):  # merge neighbours with the same speed
+        if segs and segs[-1][2] == f and abs(segs[-1][1] - a) < 1e-6:
+            segs[-1] = (segs[-1][0], b, f)
+        else:
+            segs.append((a, b, f))
+    work = dst.parent / "segments"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir()
+    listing = []
+    for i, (a, b, f) in enumerate(segs):
+        tempo, r = [], f
+        while r > 2.0:  # atempo accepts 0.5–2.0 per stage
+            tempo.append("atempo=2.0")
+            r /= 2.0
+        tempo.append(f"atempo={r:.4f}")
+        out = work / f"s{i:03}.mp4"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{a:.3f}", "-to", f"{b:.3f}", "-i", str(src),
+                        "-filter:v", f"setpts=PTS/{f}", "-filter:a", ",".join(tempo), "-r", "30",
+                        "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", str(out)], check=True)
+        listing.append(f"file '{out.name}'")
+    (work / "list.txt").write_text("\n".join(listing) + "\n")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(work / "list.txt"),
+                    "-c", "copy", "-movflags", "+faststart", str(dst)], check=True)
+    return [(sid, remap(a, segs), remap(b, segs)) for sid, a, b in cues]
 
 
 def main():
@@ -385,10 +450,11 @@ def main():
     KEY = fresh_wallet()
     durations = synthesize()
     video, cues = record(durations)
+    full = OUT / "full.mp4"
+    mux(video, cues, full)
+    cues = tighten(full, cues, OUT / "qvault-demo.mp4")
     srt(cues, OUT / "qvault-demo.srt")
-    mux(video, cues, OUT / "qvault-demo.mp4")
-    length = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
-                                   str(OUT / "qvault-demo.mp4")], capture_output=True, text=True).stdout.strip() or 0)
+    length = duration(OUT / "qvault-demo.mp4")
     print(f"::notice::Video ready: {length:.0f} s, {(OUT / 'qvault-demo.mp4').stat().st_size / 1e6:.1f} MB")
 
 
