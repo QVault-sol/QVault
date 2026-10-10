@@ -1,0 +1,63 @@
+name: Demo video
+
+# Records the narrated demo video against devnet and publishes it on the
+# `demo-video` branch (qvault-demo.mp4 + qvault-demo.srt).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: devnet-demo
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build web app
+        working-directory: web
+        run: npm ci && npm run build
+
+      - name: Install recorder, voice and ffmpeg
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install playwright piper-tts
+          python -m playwright install --with-deps chromium
+          mkdir -p ~/voices
+          base=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium
+          curl -sSfL -o ~/voices/en_US-lessac-medium.onnx "$base/en_US-lessac-medium.onnx" \
+            && curl -sSfL -o ~/voices/en_US-lessac-medium.onnx.json "$base/en_US-lessac-medium.onnx.json" \
+            || echo "::warning::voice download failed – captions only"
+
+      - name: Record on devnet
+        env:
+          DEVNET_KEYPAIR: ${{ secrets.DEVNET_KEYPAIR }}
+          PIPER_MODEL: /home/runner/voices/en_US-lessac-medium.onnx
+        run: python web/video/record.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: demo-video
+          path: |
+            web/video/out/qvault-demo.mp4
+            web/video/out/qvault-demo.srt
+
+      - name: Publish to the demo-video branch
+        run: |
+          mkdir pub && cp web/video/out/qvault-demo.mp4 web/video/out/qvault-demo.srt pub/
+          cd pub
+          git init -q -b demo-video
+          git config user.name "QVault"
+          git config user.email "340000283+QVault-sol@users.noreply.github.com"
+          git add . && git commit -qm "Demo video recorded on devnet (${GITHUB_SHA::7})"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" demo-video

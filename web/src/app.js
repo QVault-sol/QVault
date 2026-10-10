@@ -1,5 +1,5 @@
-// QVault web app (devnet). Wallet pays network fees; funds live in a vault that
-// only opens with a Winternitz one-time signature computed in this browser.
+// QVault web app (devnet). A normal wallet pays network fees; funds live in a vault
+// that only opens with a Winternitz one-time signature computed in this browser.
 import {
   ComputeBudgetProgram,
   Connection,
@@ -17,55 +17,58 @@ const CONFIG = {
   treasury: new PublicKey("GcDnFhLESFBYmyGfq5L9bTgf1aAuiV7tZdk3cH2G5LPD"),
   explorer: (kind, id) => `https://explorer.solana.com/${kind}/${id}?cluster=devnet`,
 };
+const DEVNET_GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
+const MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
+const DEVNET_USDC = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+const SOL_RESERVE = 10_000_000n; // keep 0.01 SOL in the wallet for fees
+
 // Public devnet RPC rate-limits bursts (HTTP 429): back off and retry instead of failing.
 async function patientFetch(url, init) {
   let res;
   for (let i = 0; i < 7; i++) {
     res = await fetch(url, init);
     if (res.status !== 429) return res;
-    await new Promise((r) => setTimeout(r, 600 * 2 ** i + Math.random() * 400));
+    await sleep(600 * 2 ** i + Math.random() * 400);
   }
   return res;
 }
 const conn = new Connection(CONFIG.rpc, { commitment: "confirmed", fetch: patientFetch, disableRetryOnRateLimit: true });
 const PID = CONFIG.programId;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ───────────── storage (per browser) ─────────────
 const store = {
-  get(k) {
-    try { return JSON.parse(localStorage.getItem("qvault." + k)); } catch { return null; }
-  },
-  set(k, v) {
-    try { localStorage.setItem("qvault." + k, JSON.stringify(v)); } catch { /* private mode */ }
-  },
+  get(k) { try { return JSON.parse(localStorage.getItem("qvault." + k)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem("qvault." + k, JSON.stringify(v)); } catch { /* private mode */ } },
 };
 
 // ───────────── state ─────────────
 const S = {
   wallet: null, // { publicKey, signTransaction, kind }
-  seed: null, // Uint8Array(32)
+  seed: null,
   index: 0,
   vaultState: null,
   vaultTokens: [],
   walletTokens: [],
-  rentKeep: null,
+  walletLamports: 0n,
+  rentKeep: 0n,
   busy: false,
 };
 
 const $ = (id) => document.getElementById(id);
 const short = (pk) => { const s = pk.toString(); return s.slice(0, 4) + "…" + s.slice(-4); };
 
-function fmtUnits(units, decimals) {
+function fmtUnits(units, decimals, maxFrac = decimals) {
   const neg = units < 0n;
-  let s = (neg ? -units : units).toString().padStart(decimals + 1, "0");
+  const s = (neg ? -units : units).toString().padStart(decimals + 1, "0");
   const int = s.slice(0, s.length - decimals);
-  let frac = decimals ? s.slice(-decimals).replace(/0+$/, "") : "";
-  return (neg ? "-" : "") + Number(int).toLocaleString("en-US") + (frac ? "." + frac : "");
+  let frac = decimals ? s.slice(-decimals).slice(0, maxFrac).replace(/0+$/, "") : "";
+  return (neg ? "-" : "") + BigInt(int).toLocaleString("en-US") + (frac ? "." + frac : "");
 }
 
 function parseUnits(str, decimals) {
-  const t = String(str).trim();
-  if (!/^\d+(\.\d+)?$/.test(t)) throw new Error("Enter a positive number, e.g. 0.25");
+  const t = String(str).trim().replace(",", ".");
+  if (!/^\d+(\.\d+)?$/.test(t)) throw new Error("Enter a positive number, for example 0.25");
   const [i, f = ""] = t.split(".");
   if (f.length > decimals) throw new Error(`At most ${decimals} decimal places`);
   const v = BigInt(i) * 10n ** BigInt(decimals) + BigInt((f + "0".repeat(decimals)).slice(0, decimals) || "0");
@@ -89,37 +92,66 @@ function explainError(e) {
   if (/User rejected/i.test(m)) return "You rejected the request in your wallet.";
   if (/insufficient lamports|Attempt to debit an account but found no record/i.test(m))
     return "Your wallet has no devnet SOL for fees. Use “Get devnet SOL” first.";
-  return m.length > 220 ? m.slice(0, 220) + "…" : m;
+  return m.length > 240 ? m.slice(0, 240) + "…" : m;
 }
 
-// ───────────── activity log ─────────────
-function logStep(text, state = "run") {
+// ───────────── feedback: toasts, activity, phases, checklist ─────────────
+function toast(text, kind = "ok", href) {
+  const el = document.createElement("div");
+  el.className = "toast" + (kind === "err" ? " err" : "");
+  el.textContent = text + " ";
+  if (href) {
+    const a = document.createElement("a");
+    a.href = href; a.target = "_blank"; a.rel = "noopener"; a.textContent = "View";
+    el.append(a);
+  }
+  $("toasts").append(el);
+  setTimeout(() => el.remove(), kind === "err" ? 9000 : 5000);
+}
+
+function logStep(text) {
   const li = document.createElement("li");
-  li.className = "step " + state;
-  li.innerHTML = `<span class="dot" aria-hidden="true"></span><span class="txt"></span>`;
+  li.className = "step run";
+  li.innerHTML = `<span class="dot" aria-hidden="true"></span><span class="txt"></span><span class="lnk"></span>`;
   li.querySelector(".txt").textContent = text;
   $("log").prepend(li);
   $("log-empty").hidden = true;
   return {
-    done(sig, label = "View transaction") {
+    done(sig) {
       li.className = "step ok";
       if (sig) {
         const a = document.createElement("a");
-        a.href = CONFIG.explorer("tx", sig);
-        a.target = "_blank";
-        a.rel = "noopener";
-        a.textContent = label;
-        li.append(a);
+        a.href = CONFIG.explorer("tx", sig); a.target = "_blank"; a.rel = "noopener"; a.textContent = "Explorer";
+        li.querySelector(".lnk").append(a);
       }
     },
     fail(msg) {
       li.className = "step err";
-      li.querySelector(".txt").textContent = text + " — " + msg;
+      li.querySelector(".txt").textContent = text + " – " + msg;
     },
   };
 }
 
-// ───────────── transactions ─────────────
+const PHASES = ["sign", "commit", "payout", "rotate"];
+function phase(name, state, sig) {
+  const li = document.querySelector(`.phases li[data-p="${name}"]`);
+  if (!li) return;
+  li.className = state;
+  li.querySelector("a")?.remove();
+  if (sig) {
+    const a = document.createElement("a");
+    a.href = CONFIG.explorer("tx", sig); a.target = "_blank"; a.rel = "noopener"; a.textContent = "View on explorer";
+    li.append(a);
+  }
+}
+const resetPhases = () => PHASES.forEach((p) => phase(p, ""));
+
+function demoStep(k, state) {
+  const li = document.querySelector(`#demo-steps li[data-k="${k}"]`);
+  if (li) li.className = state;
+}
+
+// ───────────── chain helpers ─────────────
 async function sendTx(ixs, label, extraSigners = []) {
   const step = logStep(label);
   try {
@@ -148,9 +180,9 @@ async function waitFor(sig, lastValidBlockHeight) {
     if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) return;
     if (i % 5 === 4 && lastValidBlockHeight && (await conn.getBlockHeight("confirmed")) > lastValidBlockHeight)
       throw new Error("Transaction expired before it landed. Please try again.");
-    await new Promise((r) => setTimeout(r, 1500));
+    await sleep(1500);
   }
-  throw new Error("Not confirmed after 2 min – check the activity link later");
+  throw new Error("Not confirmed after 2 minutes. Check the activity link later.");
 }
 
 async function vaultState(vault) {
@@ -177,13 +209,6 @@ async function tokenAccounts(owner) {
   return out;
 }
 
-async function mintInfo(mint) {
-  const acc = await conn.getAccountInfo(mint, "confirmed");
-  if (!acc || !(acc.owner.equals(qc.TOKEN_PROGRAM) || acc.owner.equals(qc.TOKEN_2022_PROGRAM)))
-    throw new Error("Not a token mint");
-  return { decimals: acc.data[44], program: acc.owner };
-}
-
 const key = (i = S.index) => new qc.WotsKey(S.seed, i);
 const currentVault = () => key().vault(PID)[0];
 
@@ -191,6 +216,13 @@ async function ensureOpen(k, label) {
   const [vault] = k.vault(PID);
   if (!(await vaultState(vault))) await sendTx([qc.ixOpen(PID, S.wallet.publicKey, k)], label);
   return vault;
+}
+
+function tokenLabel(mint) {
+  const tm = store.get("testMint");
+  if (tm && tm.mint === mint.toString()) return "qUSD";
+  if (mint.toString() === DEVNET_USDC) return "USDC";
+  return short(mint);
 }
 
 // ───────────── wallet ─────────────
@@ -221,12 +253,8 @@ async function useDemoWallet() {
   await afterConnect();
 }
 
-const DEVNET_GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
-const MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
-let walletLamports = 0n;
-
 function requireFunds(minSol = 0.003) {
-  if (walletLamports < BigInt(Math.round(minSol * LAMPORTS_PER_SOL)))
+  if (S.walletLamports < BigInt(Math.round(minSol * LAMPORTS_PER_SOL)))
     throw new Error(`Your wallet needs at least ${minSol} devnet SOL for this. Get free devnet SOL at faucet.solana.com ` +
       "(choose Devnet). Using Phantom? Turn on Settings → Developer Settings → Testnet Mode and pick Solana Devnet.");
 }
@@ -234,13 +262,14 @@ function requireFunds(minSol = 0.003) {
 async function afterConnect() {
   const genesis = await conn.getGenesisHash();
   if (genesis === MAINNET_GENESIS) throw new Error("This demo refuses to run on mainnet. Real funds must not be used.");
-  if (genesis !== DEVNET_GENESIS) throw new Error("The RPC endpoint is not Solana devnet – stopping.");
-  $("wallet-btn").textContent = short(S.wallet.publicKey);
+  if (genesis !== DEVNET_GENESIS) throw new Error("The RPC endpoint is not Solana devnet. Stopping.");
+  $("landing").hidden = true;
+  $("app").hidden = false;
+  $("wallet-chip").hidden = false;
+  $("disconnect").hidden = false;
+  $("chip-addr").textContent = short(S.wallet.publicKey);
   $("wallet-kind").textContent = S.wallet.kind;
   $("wallet-addr").textContent = S.wallet.publicKey.toString();
-  $("connect").hidden = true;
-  $("app").hidden = false;
-  $("exposed-key").textContent = short(S.wallet.publicKey);
   S.rentKeep = BigInt(await conn.getMinimumBalanceForRentExemption(qc.STATE_LEN));
   const saved = store.get("seed");
   if (saved) {
@@ -248,6 +277,15 @@ async function afterConnect() {
     S.index = store.get("index") ?? 0;
   }
   await refresh();
+  selectTab(S.seed && S.vaultState && (S.vaultState.lamports - S.rentKeep > 0n || S.vaultTokens.length) ? "send" : "deposit");
+}
+
+function disconnect() {
+  S.wallet = null;
+  $("app").hidden = true;
+  $("landing").hidden = false;
+  $("wallet-chip").hidden = true;
+  $("disconnect").hidden = true;
 }
 
 async function airdrop() {
@@ -256,45 +294,47 @@ async function airdrop() {
     const sig = await conn.requestAirdrop(S.wallet.publicKey, LAMPORTS_PER_SOL);
     await waitFor(sig);
     step.done(sig);
+    toast("1 devnet SOL received");
   } catch {
-    step.fail("the public faucet is rate-limited right now. Use faucet.solana.com with the address above.");
+    step.fail("the public faucet is busy. Use faucet.solana.com with your wallet address.");
+    throw new Error("The devnet airdrop is rate-limited right now. Copy your wallet address and use faucet.solana.com (Devnet).");
   }
-  await refresh();
 }
 
 // ───────────── vault lifecycle ─────────────
-async function createVault() {
+function newSeed() {
   S.seed = crypto.getRandomValues(new Uint8Array(32));
   S.index = 0;
   store.set("seed", qc.toHex(S.seed));
   store.set("index", 0);
   store.set("pending", null);
-  await run(async () => {
-    await ensureOpen(key(), "Opening your quantum-safe vault");
-    showRecovery(true);
-  });
 }
 
-async function restoreVault() {
-  const input = prompt("Paste your 64-character recovery code");
-  if (!input) return;
-  let seed;
-  try { seed = qc.fromHex(input); } catch (e) { alert(e.message); return; }
+async function createVault() {
+  requireFunds();
+  newSeed();
+  await ensureOpen(key(), "Opening your quantum-safe vault");
+  $("recovery").open = true;
+  toast("Vault created. Write down your recovery code.");
+  selectTab("deposit");
+}
+
+async function restoreVault(code) {
+  const seed = qc.fromHex(code);
   S.seed = seed;
   S.index = 0;
-  await run(async () => {
-    const step = logStep("Looking for your current vault");
-    for (;;) {
-      const st = await vaultState(key().vault(PID)[0]);
-      if (!st || st.status === 1) break;
-      if (st.status === 2 && st.lamports - S.rentKeep > 0n) break; // unfinished withdrawal
-      S.index++;
-    }
-    store.set("seed", qc.toHex(S.seed));
-    store.set("index", S.index);
-    step.done();
-    await ensureOpen(key(), "Opening vault #" + S.index);
-  });
+  const step = logStep("Looking for your current vault");
+  for (;;) {
+    const st = await vaultState(key().vault(PID)[0]);
+    if (!st || st.status === 1) break;
+    if (st.status === 2 && st.lamports - S.rentKeep > 0n) break; // unfinished withdrawal
+    S.index++;
+  }
+  store.set("seed", qc.toHex(S.seed));
+  store.set("index", S.index);
+  step.done();
+  await ensureOpen(key(), "Opening vault #" + S.index);
+  toast(`Restored. Current vault is #${S.index}.`);
 }
 
 // Token-2022 extensions that change transfer behaviour would leave tokens stuck in a rotating vault.
@@ -313,147 +353,153 @@ async function depositCore(assetSel, amountStr) {
   const vault = currentVault();
   if (assetSel === "SOL") {
     const lamports = parseUnits(amountStr, 9);
-    await sendTx([SystemProgram.transfer({ fromPubkey: S.wallet.publicKey, toPubkey: vault, lamports })],
+    if (lamports + 5000n > S.walletLamports) throw new Error("Your wallet does not hold that much SOL");
+    const sig = await sendTx([SystemProgram.transfer({ fromPubkey: S.wallet.publicKey, toPubkey: vault, lamports })],
       `Depositing ${amountStr} SOL`);
+    toast(`Deposited ${amountStr} SOL`, "ok", CONFIG.explorer("tx", sig));
   } else {
     const t = S.walletTokens.find((x) => x.address.toString() === assetSel);
     if (!t) throw new Error("Pick a token from your wallet");
     const units = parseUnits(amountStr, t.decimals);
     if (units > t.amount) throw new Error("Your wallet does not hold that many tokens");
     await assertSupportedMint(t.mint, t.program);
-    await sendTx([
+    const sig = await sendTx([
       qc.ixCreateAtaIdempotent(S.wallet.publicKey, vault, t.mint, t.program),
       qc.ixTransferChecked(t.address, t.mint, qc.ata(vault, t.mint, t.program), S.wallet.publicKey, units, t.decimals, t.program),
     ], `Depositing ${amountStr} ${tokenLabel(t.mint)}`);
+    toast(`Deposited ${amountStr} ${tokenLabel(t.mint)}`, "ok", CONFIG.explorer("tx", sig));
   }
 }
 
-async function deposit() {
-  const assetSel = $("dep-asset").value;
-  const amountStr = $("dep-amount").value;
-  await run(async () => {
-    requireFunds();
-    await depositCore(assetSel, amountStr);
-    $("dep-amount").value = "";
-  });
-}
-
 async function withdrawCore({ recipientStr, assetSel, amountStr, resumeOnly = false }) {
-    const idx = S.index;
-    const k = key(idx);
-    const nextK = key(idx + 1);
-    const [vault] = k.vault(PID);
-    const [nextVault] = nextK.vault(PID);
-    let st = await vaultState(vault);
-    if (!st) throw new Error("Vault not opened yet");
+  const idx = S.index;
+  const k = key(idx);
+  const nextK = key(idx + 1);
+  const [vault] = k.vault(PID);
+  const [nextVault] = nextK.vault(PID);
+  let st = await vaultState(vault);
+  if (!st) throw new Error("Open a vault first");
+  resetPhases();
+  $("flow").scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+  let label = "";
 
-    if (st.status === 2) {
-      logStep("Signed withdrawal found on-chain – finishing it").done();
+  if (st.status === 2) {
+    phase("sign", "ok");
+    phase("commit", "ok");
+    logStep("Signed withdrawal found on-chain, finishing it").done();
+  } else {
+    if (resumeOnly) return;
+    let recipient;
+    try { recipient = new PublicKey(String(recipientStr).trim()); } catch { throw new Error("Recipient is not a valid Solana address"); }
+    let mint = qc.SOL_MINT, decimals = 9;
+    if (assetSel !== "SOL") {
+      const t = S.vaultTokens.find((x) => x.mint.toString() === assetSel);
+      if (!t) throw new Error("That token is not in the vault");
+      mint = t.mint;
+      decimals = t.decimals;
+    }
+    const amount = parseUnits(amountStr, decimals);
+    const fee = qc.feeFor(amount);
+    label = `${fmtUnits(amount, decimals)} ${mint.equals(qc.SOL_MINT) ? "SOL" : tokenLabel(mint)}`;
+    const request = { index: idx, recipient: recipient.toString(), mint: mint.toString(), amount: amount.toString() };
+    const pend = store.get("pending");
+    if (pend && JSON.stringify(pend) !== JSON.stringify(request))
+      throw new Error("A signed withdrawal is waiting to land. Repeat it with exactly the same values: "
+        + `${pend.amount} units to ${pend.recipient}. A one-time key must never sign twice.`);
+
+    if (mint.equals(qc.SOL_MINT)) {
+      const excess = st.lamports - S.rentKeep;
+      if (excess < amount + fee) throw new Error(`Not enough SOL: the vault holds ${fmtUnits(excess, 9)}, you need ${fmtUnits(amount + fee, 9)} including the fee`);
+      const rcpt = await conn.getAccountInfo(recipient);
+      if (rcpt?.executable) throw new Error("That address is a program and cannot receive SOL");
+      if (!rcpt && amount < BigInt(await conn.getMinimumBalanceForRentExemption(0)))
+        throw new Error("New recipient accounts need at least 0.00089 SOL");
     } else {
-      if (resumeOnly) return;
-      let recipient;
-      try { recipient = new PublicKey(String(recipientStr).trim()); } catch { throw new Error("Recipient is not a valid Solana address"); }
-      let mint = qc.SOL_MINT, decimals = 9;
-      if (assetSel !== "SOL") {
-        const t = S.vaultTokens.find((x) => x.mint.toString() === assetSel);
-        if (!t) throw new Error("That token is not in the vault");
-        mint = t.mint;
-        decimals = t.decimals;
-      }
-      const amount = parseUnits(amountStr, decimals);
-      const fee = qc.feeFor(amount);
-      const request = { index: idx, recipient: recipient.toString(), mint: mint.toString(), amount: amount.toString() };
-      const pend = store.get("pending");
-      if (pend && JSON.stringify(pend) !== JSON.stringify(request))
-        throw new Error("A signed withdrawal is waiting to land. Repeat it with exactly the same values: "
-          + `${pend.amount} units to ${pend.recipient}. A one-time key must never sign twice.`);
-
-      if (mint.equals(qc.SOL_MINT)) {
-        const excess = st.lamports - S.rentKeep;
-        if (excess < amount + fee) throw new Error(`Not enough SOL: the vault holds ${fmtUnits(excess, 9)}, you need ${fmtUnits(amount + fee, 9)} incl. fee`);
-        const rcpt = await conn.getAccountInfo(recipient);
-        if (rcpt?.executable) throw new Error("That address is a program and cannot receive SOL");
-        if (!rcpt && amount < BigInt(await conn.getMinimumBalanceForRentExemption(0)))
-          throw new Error("New recipient accounts need at least 0.00089 SOL");
-      } else {
-        const bal = S.vaultTokens.filter((x) => x.mint.equals(mint)).reduce((s, x) => s + x.amount, 0n);
-        if (bal < amount + fee) throw new Error(`Not enough tokens: the vault holds ${fmtUnits(bal, decimals)}, you need ${fmtUnits(amount + fee, decimals)} incl. fee`);
-      }
-
-      await ensureOpen(nextK, `Preparing next vault #${idx + 1}`);
-      const s1 = logStep("Computing Winternitz one-time signature in your browser");
-      const sig = k.sign(qc.messageDigest(PID, vault, recipient, nextVault, mint, amount));
-      s1.done();
-      store.set("pending", request); // from here on this key counts as used
-      try {
-        await sendTx([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
-          qc.ixCommit(PID, vault, recipient, nextVault, mint, amount, sig)],
-          "Quantum-safe commit: verifying 840-byte hash signature on-chain");
-      } catch (e) {
-        // Rejected in simulation = never broadcast, so the signature stayed private.
-        if (/Simulation failed|simulation failed/.test(String(e?.message))) store.set("pending", null);
-        throw e;
-      }
-      st = await vaultState(vault);
+      const bal = S.vaultTokens.filter((x) => x.mint.equals(mint)).reduce((s, x) => s + x.amount, 0n);
+      if (bal < amount + fee) throw new Error(`Not enough tokens: the vault holds ${fmtUnits(bal, decimals)}, you need ${fmtUnits(amount + fee, decimals)} including the fee`);
     }
 
-    const payer = S.wallet.publicKey;
+    await ensureOpen(nextK, `Preparing next vault #${idx + 1}`);
+    phase("sign", "run");
+    const s1 = logStep("Computing an 840-byte Winternitz signature in this browser");
+    await sleep(30); // let the UI paint before the hashing loop
+    const sig = k.sign(qc.messageDigest(PID, vault, recipient, nextVault, mint, amount));
+    s1.done();
+    phase("sign", "ok");
+    phase("commit", "run");
+    store.set("pending", request); // from here on this key counts as used
+    try {
+      const csig = await sendTx([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+        qc.ixCommit(PID, vault, recipient, nextVault, mint, amount, sig)],
+        "Commit: program verifies the hash signature on-chain");
+      phase("commit", "ok", csig);
+    } catch (e) {
+      phase("commit", "err");
+      // Rejected in simulation means never broadcast, so the signature stayed private.
+      if (/Simulation failed|simulation failed/.test(String(e?.message))) store.set("pending", null);
+      throw e;
+    }
+    st = await vaultState(vault);
+  }
+
+  const payer = S.wallet.publicKey;
+  phase("payout", "run");
+  let payoutSig = null;
+  try {
     for (const t of await tokenAccounts(vault)) {
       const nextTok = qc.ata(st.nextVault, t.mint, t.program);
       const ixs = [qc.ixCreateAtaIdempotent(payer, st.nextVault, t.mint, t.program)];
       let rTok = nextTok, trTok = nextTok;
-      if (t.mint.equals(st.mint) && !st.paid) {
+      const isPayout = t.mint.equals(st.mint) && !st.paid;
+      if (isPayout) {
         rTok = qc.ata(st.recipient, t.mint, t.program);
         trTok = qc.ata(CONFIG.treasury, t.mint, t.program);
         ixs.push(qc.ixCreateAtaIdempotent(payer, st.recipient, t.mint, t.program),
           qc.ixCreateAtaIdempotent(payer, CONFIG.treasury, t.mint, t.program));
       }
       ixs.push(qc.ixSweep(PID, vault, t.address, t.mint, nextTok, rTok, trTok, t.program));
-      await sendTx(ixs, `Paying out and moving ${tokenLabel(t.mint)} to the new vault`);
+      const s = await sendTx(ixs, isPayout ? `Paying out ${tokenLabel(t.mint)}, moving the rest on`
+        : `Moving ${tokenLabel(t.mint)} to the next vault`);
+      if (isPayout) payoutSig = s;
     }
-    await sendTx([qc.ixFinish(PID, vault, st.nextVault, st.recipient, CONFIG.treasury)],
-      "Moving remaining SOL to the new vault");
+    const fsig = await sendTx([qc.ixFinish(PID, vault, st.nextVault, st.recipient, CONFIG.treasury)],
+      st.mint.equals(qc.SOL_MINT) ? "Paying out SOL, moving the rest to the next vault" : "Moving remaining SOL to the next vault");
+    phase("payout", "ok", payoutSig ?? fsig);
+    phase("rotate", "ok", fsig);
+  } catch (e) {
+    phase("payout", "err");
+    throw e;
+  }
 
-    S.index = idx + 1;
-    store.set("index", S.index);
-    store.set("pending", null);
-    document.querySelector(".door")?.classList.add("rotate");
-    logStep(`Done. Vault #${idx} is spent; your funds are in vault #${S.index} with a fresh key.`).done();
-}
-
-async function withdraw(resumeOnly = false) {
-  const args = { recipientStr: $("send-to").value, assetSel: $("send-asset").value, amountStr: $("send-amount").value, resumeOnly };
-  await run(async () => {
-    requireFunds();
-    await withdrawCore(args);
-    $("send-amount").value = "";
-  });
+  S.index = idx + 1;
+  store.set("index", S.index);
+  store.set("pending", null);
+  spinDoor();
+  logStep(`Vault #${idx} is spent. Your funds are in vault #${S.index} under a fresh key.`).done();
+  toast(label ? `Sent ${label} quantum-safe` : "Withdrawal finished");
 }
 
 async function mintCore() {
-    const me = S.wallet.publicKey;
-    const stored = store.get("testMint");
-    let mintPk = stored && stored.owner === me.toString() ? new PublicKey(stored.mint) : null;
-    const ixs = [];
-    let signers = [];
-    if (!mintPk || !(await conn.getAccountInfo(mintPk))) {
-      const mintKp = Keypair.generate();
-      mintPk = mintKp.publicKey;
-      signers = [mintKp];
-      ixs.push(
-        SystemProgram.createAccount({ fromPubkey: me, newAccountPubkey: mintPk,
-          lamports: await conn.getMinimumBalanceForRentExemption(82), space: 82, programId: qc.TOKEN_PROGRAM }),
-        qc.ixInitMint2(mintPk, me, 6),
-      );
-    }
-    ixs.push(qc.ixCreateAtaIdempotent(me, me, mintPk), qc.ixMintTo(mintPk, qc.ata(me, mintPk), me, 1000n * 10n ** 6n));
-    await sendTx(ixs, "Minting 1,000 qUSD test tokens to your wallet", signers);
-    store.set("testMint", { owner: me.toString(), mint: mintPk.toString() });
-    return mintPk;
-}
-
-async function mintTestTokens() {
-  await run(async () => { requireFunds(); await mintCore(); });
+  const me = S.wallet.publicKey;
+  const stored = store.get("testMint");
+  let mintPk = stored && stored.owner === me.toString() ? new PublicKey(stored.mint) : null;
+  const ixs = [];
+  let signers = [];
+  if (!mintPk || !(await conn.getAccountInfo(mintPk))) {
+    const mintKp = Keypair.generate();
+    mintPk = mintKp.publicKey;
+    signers = [mintKp];
+    ixs.push(
+      SystemProgram.createAccount({ fromPubkey: me, newAccountPubkey: mintPk,
+        lamports: await conn.getMinimumBalanceForRentExemption(82), space: 82, programId: qc.TOKEN_PROGRAM }),
+      qc.ixInitMint2(mintPk, me, 6),
+    );
+  }
+  ixs.push(qc.ixCreateAtaIdempotent(me, me, mintPk), qc.ixMintTo(mintPk, qc.ata(me, mintPk), me, 1000n * 10n ** 6n));
+  await sendTx(ixs, "Minting 1,000 qUSD test tokens to your wallet", signers);
+  store.set("testMint", { owner: me.toString(), mint: mintPk.toString() });
+  toast("1,000 qUSD test tokens are in your wallet");
+  return mintPk;
 }
 
 // Public RPC lists new token accounts with a short delay.
@@ -461,75 +507,74 @@ async function waitForToken(owner, mint, minAmount = 1n) {
   for (let i = 0; i < 30; i++) {
     const t = (await tokenAccounts(owner)).find((x) => x.mint.equals(mint) && x.amount >= minAmount);
     if (t) return t;
-    await new Promise((r) => setTimeout(r, 2000));
+    await sleep(2000);
   }
-  throw new Error("Token account did not show up on the devnet RPC – press the button again");
+  throw new Error("The token account did not show up on the devnet RPC yet. Press the button again.");
 }
 
 // One click for judges: SOL and an SPL token go in, and both come back out with hash signatures.
 async function guidedDemo() {
-  await run(async () => {
-    requireFunds(0.08);
-    const me = S.wallet.publicKey;
-    logStep("Guided demo: SOL + SPL token in, both out with Winternitz signatures").done();
-    if (!S.seed) {
-      S.seed = crypto.getRandomValues(new Uint8Array(32));
-      S.index = 0;
-      store.set("seed", qc.toHex(S.seed));
-      store.set("index", 0);
-      store.set("pending", null);
-    }
+  requireFunds(0.08);
+  const me = S.wallet.publicKey;
+  document.querySelectorAll("#demo-steps li").forEach((li) => (li.className = ""));
+  const step = async (k, fn) => {
+    demoStep(k, "run");
+    try { const r = await fn(); demoStep(k, "ok"); await refresh(); return r; } catch (e) { demoStep(k, "err"); throw e; }
+  };
+  await step("open", async () => {
+    if (!S.seed) newSeed();
     await ensureOpen(key(), "Opening your quantum-safe vault");
-    await depositCore("SOL", "0.05");
-    const mint = await mintCore();
+  });
+  await step("sol-in", () => depositCore("SOL", "0.05"));
+  const mint = await step("mint", () => mintCore());
+  await step("tok-in", async () => {
     const walletTok = await waitForToken(me, mint);
     S.walletTokens = await tokenAccounts(me);
     await depositCore(walletTok.address.toString(), "10");
-    await refresh();
-    await withdrawCore({ recipientStr: me.toString(), assetSel: "SOL", amountStr: "0.01" });
+  });
+  await step("sol-out", () => withdrawCore({ recipientStr: me.toString(), assetSel: "SOL", amountStr: "0.01" }));
+  await step("tok-out", async () => {
     await waitForToken(currentVault(), mint);
     await refresh();
     await withdrawCore({ recipientStr: me.toString(), assetSel: mint.toString(), amountStr: "2" });
-    logStep("Guided demo complete: 0.01 SOL and 2 qUSD withdrawn to your wallet, rest rotated to a fresh vault.").done();
   });
+  logStep("Guided demo complete: 0.01 SOL and 2 qUSD withdrawn to your wallet, the rest rotated to a fresh vault.").done();
+  toast("Guided demo complete");
 }
 
 // ───────────── UI ─────────────
-function tokenLabel(mint) {
-  const tm = store.get("testMint");
-  if (tm && tm.mint === mint.toString()) return "qUSD";
-  if (mint.toString() === "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU") return "USDC";
-  return short(mint);
-}
-
-async function run(fn) {
+async function run(btn, fn) {
   if (S.busy) return;
   S.busy = true;
   document.body.classList.add("busy");
+  btn?.setAttribute("aria-busy", "true");
   $("error").hidden = true;
   try {
     await fn();
   } catch (e) {
-    $("error").textContent = explainError(e);
+    const msg = explainError(e);
+    $("error").textContent = msg;
     $("error").hidden = false;
+    toast(msg, "err");
   } finally {
     S.busy = false;
     document.body.classList.remove("busy");
+    btn?.removeAttribute("aria-busy");
     await refresh().catch(() => {});
   }
 }
 
-function drawDoor(pkHash) {
-  const svg = $("door");
+function drawDoor(svg, pkHash) {
   const cx = 120, cy = 120, rf = 112, rd = rf * 0.74;
   const NS = "http://www.w3.org/2000/svg";
   const el = (n, a) => { const e = document.createElementNS(NS, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
   svg.replaceChildren();
   const g = el("g", { class: "door" });
-  g.append(el("circle", { cx, cy, r: rf, class: "frame" }), el("circle", { cx, cy, r: rd, class: "leaf" }));
+  g.append(el("circle", { cx, cy, r: rf, class: "frame" }), el("circle", { cx, cy, r: rf * 0.93, class: "ring" }),
+    el("circle", { cx, cy, r: rd, class: "leaf" }));
   for (let i = 0; i < 30; i++) {
     const a = -Math.PI / 2 + (i * 2 * Math.PI) / 30;
-    const L = pkHash ? 0.15 + 0.85 * (pkHash[i] / 255) : 0.1;
+    const L = pkHash ? 0.15 + 0.85 * (pkHash[i] / 255) : 0.55 + 0.35 * Math.sin(i * 1.7) ** 2;
     const r0 = rd * 0.9, r1 = rd + (rf * 0.93 - rd) * L;
     const x0 = cx + r0 * Math.cos(a), y0 = cy + r0 * Math.sin(a);
     g.append(el("rect", { x: x0, y: y0 - 2.6, width: r1 - r0, height: 5.2, rx: 1.3, class: "bolt",
@@ -544,45 +589,97 @@ function drawDoor(pkHash) {
   svg.append(g);
 }
 
-function option(value, text) {
-  const o = document.createElement("option");
-  o.value = value;
-  o.textContent = text;
-  return o;
+let doorKey = null;
+function spinDoor() {
+  const g = document.querySelector("#door .door");
+  if (!g) return;
+  g.classList.remove("spin");
+  void g.getBoundingClientRect();
+  g.classList.add("spin");
+}
+
+function chips(containerId, name, items, emptyText) {
+  const box = $(containerId);
+  const prev = box.querySelector("input:checked")?.value;
+  box.replaceChildren();
+  if (!items.length) {
+    const p = document.createElement("p");
+    p.className = "none";
+    p.textContent = emptyText;
+    box.append(p);
+    return;
+  }
+  items.forEach((it, i) => {
+    const lab = document.createElement("label");
+    lab.className = "chip";
+    lab.innerHTML = `<input type="radio" name="${name}"><span><b></b><small></small></span>`;
+    const input = lab.querySelector("input");
+    input.value = it.value;
+    input.checked = prev ? prev === it.value : i === 0;
+    lab.querySelector("b").textContent = it.label;
+    lab.querySelector("small").textContent = it.sub;
+    box.append(lab);
+  });
+  if (!box.querySelector("input:checked")) box.querySelector("input").checked = true;
+}
+const chosen = (name) => document.querySelector(`input[name="${name}"]:checked`)?.value;
+
+function selectTab(name) {
+  for (const t of ["send", "deposit", "demo"]) {
+    $("tab-" + t).setAttribute("aria-selected", String(t === name));
+    $("panel-" + t).hidden = t !== name;
+  }
 }
 
 async function refresh() {
   if (!S.wallet) return;
   const solBal = BigInt(await conn.getBalance(S.wallet.publicKey, "confirmed"));
-  walletLamports = solBal;
-  $("wallet-sol").textContent = fmtUnits(solBal, 9) + " SOL";
+  S.walletLamports = solBal;
+  $("wallet-sol").textContent = fmtUnits(solBal, 9, 4) + " SOL";
+  $("chip-sol").textContent = fmtUnits(solBal, 9, 3) + " SOL";
   $("no-sol").hidden = solBal >= 10_000_000n;
   S.walletTokens = await tokenAccounts(S.wallet.publicKey);
-  $("dep-asset").replaceChildren(option("SOL", `SOL (wallet: ${fmtUnits(solBal, 9)})`),
+  chips("dep-assets", "dep-asset", [
+    { value: "SOL", label: "SOL", sub: fmtUnits(solBal, 9, 4) },
     ...S.walletTokens.filter((t) => t.amount > 0n).map((t) =>
-      option(t.address.toString(), `${tokenLabel(t.mint)} (wallet: ${fmtUnits(t.amount, t.decimals)})`)));
+      ({ value: t.address.toString(), label: tokenLabel(t.mint), sub: fmtUnits(t.amount, t.decimals, 2) })),
+  ], "");
 
   const hasVault = !!S.seed;
   $("no-vault").hidden = hasVault;
   $("vault").hidden = !hasVault;
-  if (!hasVault) { drawDoor(null); return; }
+  if (!hasVault) {
+    $("vault-index").textContent = "";
+    $("vault-badge").hidden = true;
+    chips("send-assets", "send-asset", [], "Create a vault and deposit first.");
+    return;
+  }
 
   const k = key();
   const [vault] = k.vault(PID);
   const st = await vaultState(vault);
   S.vaultState = st;
-  drawDoor(k.pkHash());
+  if (doorKey !== `${S.index}`) { drawDoor($("door"), k.pkHash()); doorKey = `${S.index}`; }
   $("vault-index").textContent = "#" + S.index;
+  $("sum-key").textContent = String(S.index);
   $("vault-addr").textContent = vault.toString();
   $("vault-link").href = CONFIG.explorer("address", vault.toString());
+  $("recovery-code").textContent = qc.toHex(S.seed);
   const rows = [];
+  const sendItems = [];
   if (st) {
-    const sol = st.lamports - S.rentKeep;
-    rows.push(["SOL", fmtUnits(sol > 0n ? sol : 0n, 9)]);
+    const sol = st.lamports - S.rentKeep > 0n ? st.lamports - S.rentKeep : 0n;
+    rows.push(["SOL", fmtUnits(sol, 9, 4)]);
+    if (sol > 0n) sendItems.push({ value: "SOL", label: "SOL", sub: fmtUnits(sol, 9, 4) });
     S.vaultTokens = await tokenAccounts(vault);
-    for (const t of S.vaultTokens) rows.push([tokenLabel(t.mint), fmtUnits(t.amount, t.decimals)]);
-    $("send-asset").replaceChildren(option("SOL", "SOL"), ...S.vaultTokens.map((t) => option(t.mint.toString(), tokenLabel(t.mint))));
+    for (const t of S.vaultTokens) {
+      rows.push([tokenLabel(t.mint), fmtUnits(t.amount, t.decimals, 2)]);
+      if (t.amount > 0n) sendItems.push({ value: t.mint.toString(), label: tokenLabel(t.mint), sub: fmtUnits(t.amount, t.decimals, 2) });
+    }
+  } else {
+    S.vaultTokens = [];
   }
+  chips("send-assets", "send-asset", sendItems, "The vault is empty. Deposit something first.");
   $("balances").replaceChildren(...rows.map(([a, v]) => {
     const tr = document.createElement("tr");
     tr.innerHTML = "<th scope=row></th><td></td>";
@@ -590,25 +687,52 @@ async function refresh() {
     tr.children[1].textContent = v;
     return tr;
   }));
-  $("vault-state").textContent = !st ? "not opened" : st.status === 2 ? "withdrawal in progress" : "locked";
-  $("resume").hidden = !(st && st.status === 2);
-  updateFee();
+  const rotating = st && st.status === 2;
+  $("vault-badge").hidden = !st;
+  $("vault-badge").textContent = rotating ? "Withdrawal in progress" : "Locked";
+  $("vault-badge").className = "badge" + (rotating ? " busy" : "");
+  $("resume").hidden = !rotating;
+  updateSummary();
 }
 
-function updateFee() {
+function sendAsset() {
+  const sel = chosen("send-asset");
+  const t = S.vaultTokens.find((x) => x.mint.toString() === sel);
+  return { sel, t, decimals: t ? t.decimals : 9, label: t ? tokenLabel(t.mint) : "SOL" };
+}
+
+function updateSummary() {
+  const { decimals, label } = sendAsset();
   try {
-    const sel = $("send-asset").value;
-    const t = S.vaultTokens.find((x) => x.mint.toString() === sel);
-    const d = t ? t.decimals : 9;
-    const amt = parseUnits($("send-amount").value, d);
-    $("fee").textContent = `Fee 0.1 %: ${fmtUnits(qc.feeFor(amt), d)} ${t ? tokenLabel(t.mint) : "SOL"}`;
-  } catch { $("fee").textContent = "Fee: 0.1 % of the amount sent"; }
+    const amt = parseUnits($("send-amount").value, decimals);
+    const fee = qc.feeFor(amt);
+    $("sum-fee").textContent = `${fmtUnits(fee, decimals)} ${label}`;
+    $("sum-total").textContent = `${fmtUnits(amt + fee, decimals)} ${label}`;
+  } catch {
+    $("sum-fee").textContent = "0.1 % of the amount";
+    $("sum-total").textContent = "–";
+  }
 }
 
-function showRecovery(fresh = false) {
-  $("recovery-code").textContent = qc.toHex(S.seed);
-  $("recovery").hidden = false;
-  $("recovery-fresh").hidden = !fresh;
+function maxSend() {
+  const { sel, t, decimals } = sendAsset();
+  let bal = 0n;
+  if (sel === "SOL" && S.vaultState) bal = S.vaultState.lamports - S.rentKeep;
+  else if (t) bal = t.amount;
+  const max = bal > 0n ? (bal * 10000n) / 10010n : 0n; // leave room for the 0.1 % fee
+  $("send-amount").value = max > 0n ? fmtUnits(max, decimals).replace(/,/g, "") : "";
+  updateSummary();
+}
+
+function maxDeposit() {
+  const sel = chosen("dep-asset");
+  if (sel === "SOL") {
+    const v = S.walletLamports > SOL_RESERVE ? S.walletLamports - SOL_RESERVE : 0n;
+    $("dep-amount").value = v > 0n ? fmtUnits(v, 9).replace(/,/g, "") : "";
+  } else {
+    const t = S.walletTokens.find((x) => x.address.toString() === sel);
+    if (t) $("dep-amount").value = fmtUnits(t.amount, t.decimals).replace(/,/g, "");
+  }
 }
 
 function downloadBackup() {
@@ -620,31 +744,59 @@ function downloadBackup() {
   URL.revokeObjectURL(a.href);
 }
 
-function copy(id) {
-  navigator.clipboard?.writeText($(id).textContent).catch(() => {});
+function copy(text, what) {
+  navigator.clipboard?.writeText(text).then(() => toast(`${what} copied`), () => {});
 }
 
 function bind() {
-  drawDoor(null);
-  $("phantom-btn").onclick = () => run(connectPhantom);
-  $("demo-btn").onclick = () => run(useDemoWallet);
-  $("wallet-btn").onclick = () => { if (!S.wallet) $("connect").scrollIntoView({ behavior: "smooth" }); };
-  $("airdrop-btn").onclick = () => run(airdrop);
-  $("mint-btn").onclick = mintTestTokens;
-  $("demo-run").onclick = guidedDemo;
-  $("create-btn").onclick = createVault;
-  $("restore-btn").onclick = restoreVault;
-  $("dep-form").onsubmit = (e) => { e.preventDefault(); deposit(); };
-  $("send-form").onsubmit = (e) => { e.preventDefault(); withdraw(); };
-  $("resume").onclick = () => withdraw(true);
-  $("show-code").onclick = () => showRecovery(false);
-  $("hide-code").onclick = () => { $("recovery").hidden = true; };
-  $("download-code").onclick = downloadBackup;
-  $("copy-vault").onclick = () => copy("vault-addr");
-  $("copy-wallet").onclick = () => copy("wallet-addr");
-  $("send-amount").oninput = updateFee;
-  $("send-asset").onchange = updateFee;
+  drawDoor($("door-hero"), null);
+  drawDoor($("door-empty"), null);
+  $("door-empty").classList.add("empty-door");
   $("phantom-hint").hidden = !!phantomProvider();
+
+  $("phantom-btn").onclick = (e) => run(e.currentTarget, connectPhantom);
+  $("demo-btn").onclick = (e) => run(e.currentTarget, useDemoWallet);
+  $("disconnect").onclick = disconnect;
+  $("airdrop-btn").onclick = (e) => run(e.currentTarget, airdrop);
+  $("mint-btn").onclick = (e) => run(e.currentTarget, async () => { requireFunds(); await mintCore(); });
+  $("create-btn").onclick = (e) => run(e.currentTarget, createVault);
+  $("restore-form").onsubmit = (e) => {
+    e.preventDefault();
+    run(e.submitter, () => restoreVault($("restore-code").value));
+  };
+  $("dep-form").onsubmit = (e) => {
+    e.preventDefault();
+    const sel = chosen("dep-asset"), amt = $("dep-amount").value;
+    run(e.submitter, async () => {
+      requireFunds();
+      if (!S.seed) throw new Error("Create a vault first");
+      await depositCore(sel, amt);
+      $("dep-amount").value = "";
+    });
+  };
+  $("send-form").onsubmit = (e) => {
+    e.preventDefault();
+    const args = { recipientStr: $("send-to").value, assetSel: chosen("send-asset"), amountStr: $("send-amount").value };
+    run(e.submitter, async () => {
+      requireFunds();
+      if (!args.assetSel) throw new Error("The vault is empty. Deposit something first.");
+      await withdrawCore(args);
+      $("send-amount").value = "";
+    });
+  };
+  $("resume").onclick = (e) => run(e.currentTarget, () => withdrawCore({ resumeOnly: true }));
+  $("demo-run").onclick = (e) => run(e.currentTarget, guidedDemo);
+  $("to-self").onclick = () => { $("send-to").value = S.wallet.publicKey.toString(); };
+  $("send-max").onclick = maxSend;
+  $("dep-max").onclick = maxDeposit;
+  $("send-amount").oninput = updateSummary;
+  $("send-assets").onchange = () => { $("send-amount").value = ""; updateSummary(); };
+  $("copy-vault").onclick = () => copy($("vault-addr").textContent, "Vault address");
+  $("copy-wallet").onclick = () => copy(S.wallet.publicKey.toString(), "Wallet address");
+  $("copy-code").onclick = () => copy(qc.toHex(S.seed), "Recovery code");
+  $("download-code").onclick = downloadBackup;
+  for (const t of ["send", "deposit", "demo"]) $("tab-" + t).onclick = () => selectTab(t);
+
   // Public RPC nodes index new token accounts with a short delay: refresh while idle.
   setInterval(() => { if (S.wallet && !S.busy) refresh().catch(() => {}); }, 15000);
 }
