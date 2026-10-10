@@ -557,10 +557,11 @@ async function run(btn, fn) {
     $("error").hidden = false;
     toast(msg, "err");
   } finally {
+    // Refresh before releasing the UI, so nothing re-renders under the next click.
+    await refresh().catch(() => {});
     S.busy = false;
     document.body.classList.remove("busy");
     btn?.removeAttribute("aria-busy");
-    await refresh().catch(() => {});
   }
 }
 
@@ -600,6 +601,13 @@ function spinDoor() {
 
 function chips(containerId, name, items, emptyText) {
   const box = $(containerId);
+  const sig = items.map((it) => it.value + "|" + it.label).join(",");
+  if (box.dataset.sig === sig && items.length) {
+    // Same assets: only update balances, keep the DOM (and any click in flight) intact.
+    items.forEach((it, i) => { const sm = box.querySelectorAll("small")[i]; if (sm) sm.textContent = it.sub; });
+    return;
+  }
+  box.dataset.sig = sig;
   const prev = box.querySelector("input:checked")?.value;
   box.replaceChildren();
   if (!items.length) {

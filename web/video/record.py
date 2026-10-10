@@ -173,7 +173,9 @@ class Director:
             loc = self.page.locator(f"#{box} label.chip", has_text=label)
             if loc.count():
                 self.click(f"#{box} label.chip:has-text('{label}')")
-                return
+                picked = self.page.eval_on_selector(f"#{box}", "b => b.querySelector('input:checked')?.closest('label')?.innerText || ''")
+                if label in picked:
+                    return
             time.sleep(2)
         raise SystemExit(f"::error::no {label} chip in #{box}")
 
