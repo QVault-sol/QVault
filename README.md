@@ -7,6 +7,7 @@
 | | |
 |---|---|
 | **Live demo** | **[qvault-sol.github.io/QVault](https://qvault-sol.github.io/QVault/)** – Phantom on devnet or a built-in demo wallet, one-click guided demo |
+| **Demo video** | [qvault-demo.mp4](https://github.com/QVault-sol/QVault/blob/demo-video/qvault-demo.mp4) (2:30, recorded automatically on devnet by the [Demo video](.github/workflows/video.yml) workflow) |
 | **Devnet program id** | [`DwBtsKCpRjWyo3HmQ9U9twDLF3xya4Cs2Eoq7fQFLLLo`](https://explorer.solana.com/address/DwBtsKCpRjWyo3HmQ9U9twDLF3xya4Cs2Eoq7fQFLLLo?cluster=devnet) |
 | **Attack tests** | [`program/tests/e2e.rs`](https://github.com/QVault-sol/QVault/blob/main/program/tests/e2e.rs) – [signature forgery & tampering](https://github.com/QVault-sol/QVault/blob/main/program/tests/e2e.rs#L236), [undeliverable recipients](https://github.com/QVault-sol/QVault/blob/main/program/tests/e2e.rs#L254), [redirected payouts](https://github.com/QVault-sol/QVault/blob/main/program/tests/e2e.rs#L269), [token sweep theft](https://github.com/QVault-sol/QVault/blob/main/program/tests/e2e.rs#L338), [Token-2022](https://github.com/QVault-sol/QVault/blob/main/program/tests/e2e.rs#L378) |
 | **License** | MIT |
