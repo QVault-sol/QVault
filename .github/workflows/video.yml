@@ -31,7 +31,7 @@ jobs:
       - name: Install recorder, voice and ffmpeg
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-          pip install playwright piper-tts
+          pip install playwright piper-tts solders
           python -m playwright install --with-deps chromium
           mkdir -p ~/voices
           base=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium

@@ -306,3 +306,4 @@ input:focus { border-color: var(--ink); outline: none; box-shadow: 0 0 0 3px var
   max-width: min(980px, calc(100vw - 48px)); padding: 14px 22px; border-radius: 8px;
   background: rgba(15, 42, 68, .94); color: #fff; font-size: 22px; line-height: 1.35; text-align: center;
 }
+.chips .more { min-height: 54px; }

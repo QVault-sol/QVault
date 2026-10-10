@@ -9,6 +9,7 @@ import {
   SystemProgram,
   Transaction,
 } from "@solana/web3.js";
+import { sha256 } from "@noble/hashes/sha2";
 import * as qc from "./core.js";
 
 const CONFIG = {
@@ -218,9 +219,21 @@ async function ensureOpen(k, label) {
   return vault;
 }
 
+// One deterministic test mint per wallet, so repeated demos reuse the same qUSD token.
+// Only the wallet is mint authority; knowing this keypair just lets you create the (empty) mint.
+function testMintKeypair(owner) {
+  return Keypair.fromSeed(sha256(new Uint8Array([...new TextEncoder().encode("qvault-test-mint"), ...owner.toBytes()])));
+}
+let testMintCache = null;
+function testMint() {
+  if (!S.wallet) return null;
+  if (!testMintCache || testMintCache.owner !== S.wallet.publicKey.toString())
+    testMintCache = { owner: S.wallet.publicKey.toString(), mint: testMintKeypair(S.wallet.publicKey).publicKey };
+  return testMintCache.mint;
+}
+
 function tokenLabel(mint) {
-  const tm = store.get("testMint");
-  if (tm && tm.mint === mint.toString()) return "qUSD";
+  if (testMint()?.equals(mint)) return "qUSD";
   if (mint.toString() === DEVNET_USDC) return "USDC";
   return short(mint);
 }
@@ -380,7 +393,7 @@ async function withdrawCore({ recipientStr, assetSel, amountStr, resumeOnly = fa
   let st = await vaultState(vault);
   if (!st) throw new Error("Open a vault first");
   resetPhases();
-  $("flow").scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+  $("flow").scrollIntoView?.({ behavior: "smooth", block: "center" });
   let label = "";
 
   if (st.status === 2) {
@@ -481,13 +494,11 @@ async function withdrawCore({ recipientStr, assetSel, amountStr, resumeOnly = fa
 
 async function mintCore() {
   const me = S.wallet.publicKey;
-  const stored = store.get("testMint");
-  let mintPk = stored && stored.owner === me.toString() ? new PublicKey(stored.mint) : null;
+  const mintKp = testMintKeypair(me);
+  const mintPk = mintKp.publicKey;
   const ixs = [];
   let signers = [];
-  if (!mintPk || !(await conn.getAccountInfo(mintPk))) {
-    const mintKp = Keypair.generate();
-    mintPk = mintKp.publicKey;
+  if (!(await conn.getAccountInfo(mintPk))) {
     signers = [mintKp];
     ixs.push(
       SystemProgram.createAccount({ fromPubkey: me, newAccountPubkey: mintPk,
@@ -497,7 +508,6 @@ async function mintCore() {
   }
   ixs.push(qc.ixCreateAtaIdempotent(me, me, mintPk), qc.ixMintTo(mintPk, qc.ata(me, mintPk), me, 1000n * 10n ** 6n));
   await sendTx(ixs, "Minting 1,000 qUSD test tokens to your wallet", signers);
-  store.set("testMint", { owner: me.toString(), mint: mintPk.toString() });
   toast("1,000 qUSD test tokens are in your wallet");
   return mintPk;
 }
@@ -617,8 +627,12 @@ function chips(containerId, name, items, emptyText) {
     box.append(p);
     return;
   }
+  const LIMIT = 5;
+  const extra = items.length - LIMIT;
+  const expanded = box.dataset.expanded === "1";
   items.forEach((it, i) => {
     const lab = document.createElement("label");
+    if (extra > 0 && i >= LIMIT && !expanded && it.value !== prev) lab.hidden = true;
     lab.className = "chip";
     lab.innerHTML = `<input type="radio" name="${name}"><span><b></b><small></small></span>`;
     const input = lab.querySelector("input");
@@ -629,6 +643,20 @@ function chips(containerId, name, items, emptyText) {
     box.append(lab);
   });
   if (!box.querySelector("input:checked")) box.querySelector("input").checked = true;
+  if (extra > 0 && !expanded) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "btn ghost more";
+    more.textContent = `+${extra} more`;
+    more.onclick = () => { box.dataset.expanded = "1"; box.querySelectorAll("label[hidden]").forEach((l) => (l.hidden = false)); more.remove(); };
+    box.append(more);
+  }
+}
+
+// SOL first, then labelled tokens (qUSD, USDC), then the rest by balance.
+function rank(items) {
+  const w = (it) => (it.label === "SOL" ? 0 : it.label === "qUSD" ? 1 : it.label === "USDC" ? 2 : 3);
+  return items.sort((a, b) => w(a) - w(b) || (b.raw > a.raw ? 1 : b.raw < a.raw ? -1 : 0));
 }
 const chosen = (name) => document.querySelector(`input[name="${name}"]:checked`)?.value;
 
@@ -647,11 +675,11 @@ async function refresh() {
   $("chip-sol").textContent = fmtUnits(solBal, 9, 3) + " SOL";
   $("no-sol").hidden = solBal >= 10_000_000n;
   S.walletTokens = await tokenAccounts(S.wallet.publicKey);
-  chips("dep-assets", "dep-asset", [
-    { value: "SOL", label: "SOL", sub: fmtUnits(solBal, 9, 4) },
+  chips("dep-assets", "dep-asset", rank([
+    { value: "SOL", label: "SOL", sub: fmtUnits(solBal, 9, 4), raw: solBal },
     ...S.walletTokens.filter((t) => t.amount > 0n).map((t) =>
-      ({ value: t.address.toString(), label: tokenLabel(t.mint), sub: fmtUnits(t.amount, t.decimals, 2) })),
-  ], "");
+      ({ value: t.address.toString(), label: tokenLabel(t.mint), sub: fmtUnits(t.amount, t.decimals, 2), raw: t.amount })),
+  ]), "");
 
   const hasVault = !!S.seed;
   $("no-vault").hidden = hasVault;
@@ -678,16 +706,16 @@ async function refresh() {
   if (st) {
     const sol = st.lamports - S.rentKeep > 0n ? st.lamports - S.rentKeep : 0n;
     rows.push(["SOL", fmtUnits(sol, 9, 4)]);
-    if (sol > 0n) sendItems.push({ value: "SOL", label: "SOL", sub: fmtUnits(sol, 9, 4) });
+    if (sol > 0n) sendItems.push({ value: "SOL", label: "SOL", sub: fmtUnits(sol, 9, 4), raw: sol });
     S.vaultTokens = await tokenAccounts(vault);
     for (const t of S.vaultTokens) {
       rows.push([tokenLabel(t.mint), fmtUnits(t.amount, t.decimals, 2)]);
-      if (t.amount > 0n) sendItems.push({ value: t.mint.toString(), label: tokenLabel(t.mint), sub: fmtUnits(t.amount, t.decimals, 2) });
+      if (t.amount > 0n) sendItems.push({ value: t.mint.toString(), label: tokenLabel(t.mint), sub: fmtUnits(t.amount, t.decimals, 2), raw: t.amount });
     }
   } else {
     S.vaultTokens = [];
   }
-  chips("send-assets", "send-asset", sendItems, "The vault is empty. Deposit something first.");
+  chips("send-assets", "send-asset", rank(sendItems), "The vault is empty. Deposit something first.");
   $("balances").replaceChildren(...rows.map(([a, v]) => {
     const tr = document.createElement("tr");
     tr.innerHTML = "<th scope=row></th><td></td>";

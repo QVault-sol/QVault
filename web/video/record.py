@@ -25,7 +25,50 @@ WEB = HERE.parent
 OUT = HERE / "out"
 AUDIO = OUT / "audio"
 W, H = 1280, 720
-KEY = json.loads(os.environ["DEVNET_KEYPAIR"])
+PAYER = json.loads(os.environ["DEVNET_KEYPAIR"])
+RPC = "https://api.devnet.solana.com"
+
+
+def fresh_wallet(sol: float = 0.15) -> list[int]:
+    """New demo wallet for the recording, funded from the devnet payer (no faucet needed)."""
+    import base64
+    import urllib.request
+    from solders.keypair import Keypair
+    from solders.message import Message
+    from solders.hash import Hash
+    from solders.system_program import TransferParams, transfer
+    from solders.transaction import Transaction
+
+    def rpc(method, params):
+        req = urllib.request.Request(RPC, json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode(),
+                                     {"Content-Type": "application/json"})
+        for i in range(6):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    res = json.loads(r.read())
+                if "error" not in res:
+                    return res["result"]
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(2 * (i + 1))
+        raise SystemExit(f"::error::RPC {method} failed")
+
+    payer = Keypair.from_bytes(bytes(PAYER))
+    kp = Keypair()
+    bh = Hash.from_string(rpc("getLatestBlockhash", [{"commitment": "confirmed"}])["value"]["blockhash"])
+    msg = Message.new_with_blockhash([transfer(TransferParams(from_pubkey=payer.pubkey(), to_pubkey=kp.pubkey(),
+                                                              lamports=int(sol * 1e9)))], payer.pubkey(), bh)
+    sig = rpc("sendTransaction", [base64.b64encode(bytes(Transaction([payer], msg, bh))).decode(), {"encoding": "base64"}])
+    for _ in range(60):
+        st = rpc("getSignatureStatuses", [[sig]])["value"][0]
+        if st and st.get("confirmationStatus") in ("confirmed", "finalized"):
+            print(f"::notice::Demo wallet {kp.pubkey()} funded with {sol} SOL")
+            return list(bytes(kp))
+        time.sleep(1)
+    raise SystemExit("::error::funding the demo wallet did not confirm")
+
+
+KEY = None  # set in main()
 
 NARRATION = {
     "title": "This is QVault: a quantum-safe vault for SOL and SPL tokens on Solana.",
@@ -101,8 +144,8 @@ CAPTION_JS = """
   let el = document.getElementById('__cap');
   if (!text) { if (el) el.remove(); return; }
   if (!el) { el = document.createElement('div'); el.id = '__cap'; el.className = 'caption';
-    el.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:98;max-width:1040px;' +
-      'padding:12px 20px;border-radius:8px;background:rgba(15,42,68,.94);color:#fff;font:500 21px/1.35 Archivo,system-ui,sans-serif;text-align:center';
+    el.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:98;max-width:1240px;' +
+      'padding:14px 26px;border-radius:10px;background:rgba(15,42,68,.94);color:#fff;font:500 27px/1.35 Archivo,system-ui,sans-serif;text-align:center';
     document.documentElement.appendChild(el); }
   el.textContent = text;
 }
@@ -190,7 +233,8 @@ def record(durations) -> tuple[Path, list]:
     try:
         with sync_playwright() as p:
             b = p.chromium.launch()
-            ctx = b.new_context(viewport={"width": W, "height": H}, record_video_dir=str(raw),
+            # Render at 1600x900 and scale the recording to 1280x720: more of the app fits on screen.
+            ctx = b.new_context(viewport={"width": 1600, "height": 900}, record_video_dir=str(raw),
                                 record_video_size={"width": W, "height": H}, device_scale_factor=1)
             ctx.add_init_script(f"localStorage.setItem('qvault.burner', {json.dumps(json.dumps(KEY))})")
             page = ctx.new_page()
@@ -293,7 +337,9 @@ def mux(video: Path, cues, out: Path):
 
 
 def main():
+    global KEY
     OUT.mkdir(exist_ok=True)
+    KEY = fresh_wallet()
     durations = synthesize()
     video, cues = record(durations)
     srt(cues, OUT / "qvault-demo.srt")
