@@ -1,11 +1,11 @@
 """Records the QVault demo video automatically against Solana devnet.
 
 Title slides + the live web app (demo wallet), narrated by an open-source TTS voice
-(Piper) with burned-in captions. Output: out/qvault-demo.mp4 and out/qvault-demo.srt.
+(Kokoro, Piper as fallback) with burned-in captions. Output: out/qvault-demo.mp4 and out/qvault-demo.srt.
 
 Env:
   DEVNET_KEYPAIR  funded devnet keypair (JSON byte array) used as the demo wallet
-  PIPER_MODEL     optional path to a Piper .onnx voice; without it the video has captions only
+  KOKORO_VOICE    optional Kokoro voice (default af_heart); Piper (PIPER_MODEL) is the fallback
 """
 from __future__ import annotations
 
@@ -97,29 +97,72 @@ NARRATION = {
 
 
 # ───────────── voice ─────────────
+# How the voice should pronounce terms that captions show in written form.
+SAY = [("QVault", "Q-Vault"), ("Ed25519", "E-D 2-5-5-1-9"), ("SHA-256", "SHA 256"), ("SPL", "S-P-L"),
+       ("Token-2022", "Token 2022"), ("840-byte", "840 byte"), ("DAO", "DAO"), ("devnet", "dev-net")]
+
+
+def speech(text: str) -> str:
+    for a, b in SAY:
+        text = text.replace(a, b)
+    return text
+
+
+def _wav_seconds(path: Path) -> float:
+    with wave.open(str(path), "rb") as wf:
+        return wf.getnframes() / wf.getframerate()
+
+
+def _kokoro():
+    """Kokoro-82M (Apache-2.0): natural neural voice, runs on CPU."""
+    import numpy as np
+    import soundfile as sf
+    from kokoro import KPipeline
+    pipe = KPipeline(lang_code="a")  # American English
+    voice = os.environ.get("KOKORO_VOICE", "af_heart")
+
+    def say(text: str, path: Path):
+        chunks = []
+        for r in pipe(text, voice=voice, speed=1.0):
+            audio = getattr(r, "audio", None)
+            if audio is None:
+                audio = r[2]
+            chunks.append(audio.detach().cpu().numpy() if hasattr(audio, "detach") else np.asarray(audio))
+        sf.write(str(path), np.concatenate(chunks), 24000, subtype="PCM_16")
+    return say
+
+
+def _piper():
+    from piper import PiperVoice
+    v = PiperVoice.load(os.environ["PIPER_MODEL"])
+
+    def say(text: str, path: Path):
+        with wave.open(str(path), "wb") as wf:
+            (v.synthesize_wav if hasattr(v, "synthesize_wav") else v.synthesize)(text, wf)
+    return say
+
+
 def synthesize() -> dict[str, float]:
-    """Returns duration per segment in seconds; writes WAVs when a Piper voice is available."""
+    """Returns duration per segment in seconds and writes one WAV per segment.
+
+    Tries Kokoro first, then Piper; without either the video gets captions only."""
     AUDIO.mkdir(parents=True, exist_ok=True)
-    model = os.environ.get("PIPER_MODEL")
-    durations: dict[str, float] = {}
-    voice = None
-    if model and Path(model).exists():
+    say = None
+    for name, factory in (("kokoro", _kokoro), ("piper", _piper)):
         try:
-            from piper import PiperVoice
-            voice = PiperVoice.load(model)
+            say = factory()
+            print(f"::notice::voice engine: {name}")
+            break
         except Exception as e:  # noqa: BLE001
-            print(f"::warning::Piper voice unavailable ({e}); captions only")
+            print(f"::warning::{name} unavailable: {e}")
+    durations: dict[str, float] = {}
     for sid, text in NARRATION.items():
         path = AUDIO / f"{sid}.wav"
-        if voice is not None:
-            with wave.open(str(path), "wb") as wf:
-                if hasattr(voice, "synthesize_wav"):
-                    voice.synthesize_wav(text, wf)
-                else:
-                    voice.synthesize(text, wf)
-            with wave.open(str(path), "rb") as wf:
-                durations[sid] = wf.getnframes() / wf.getframerate()
+        if say is not None:
+            say(speech(text), path)
+            durations[sid] = _wav_seconds(path)
         else:
+            path.unlink(missing_ok=True)
             durations[sid] = len(text.split()) / 2.6  # reading pace for captions
     return durations
 
@@ -322,7 +365,7 @@ def srt(cues, path: Path):
 
 
 def mux(video: Path, cues, out: Path):
-    have_audio = all((AUDIO / f"{sid}.wav").exists() for sid, _, _ in cues) and os.environ.get("PIPER_MODEL")
+    have_audio = all((AUDIO / f"{sid}.wav").exists() for sid, _, _ in cues)
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(video)]
     if have_audio:
         for sid, _, _ in cues:
