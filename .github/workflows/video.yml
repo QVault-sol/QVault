@@ -84,7 +84,7 @@ jobs:
           PIPER_MODEL: /home/runner/voices/en_US-lessac-medium.onnx
           KOKORO_VOICE: ${{ inputs.kokoro_voice }}
         run: |
-          if [ "${{ steps.voicestudio.outcome }}" != "success" ]; then
+          if [ "${{ inputs.engine }}" = "voicestudio" ] && [ "${{ steps.voicestudio.outcome }}" != "success" ]; then
             echo "::warning::VoiceStudio narration failed – falling back to Kokoro"
             rm -rf web/video/out/voice
           fi
