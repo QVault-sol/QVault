@@ -14,7 +14,7 @@ concurrency: devnet-demo
 jobs:
   record:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,11 +40,39 @@ jobs:
             && curl -sSfL -o ~/voices/en_US-lessac-medium.onnx.json "$base/en_US-lessac-medium.onnx.json" \
             || echo "::warning::voice download failed – captions only"
 
+      - name: Free disk space for VoiceStudio
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker image prune -af >/dev/null
+          df -h / | tail -1
+
+      - name: Narration with VoiceStudio (VoxCPM2 voice design)
+        id: voicestudio
+        continue-on-error: true
+        env:
+          IMAGE: ghcr.io/debpalash/voicestudio:stable
+        run: |
+          export OMNIVOICE_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          echo "::add-mask::$OMNIVOICE_API_KEY"
+          docker pull -q "$IMAGE"
+          docker run -d --name vs -p 127.0.0.1:3900:3900 \
+            -e OMNIVOICE_API_KEY="$OMNIVOICE_API_KEY" -e OMNIVOICE_ANALYTICS_DISABLED=1 \
+            -e OMNIVOICE_TTS_BACKEND=voxcpm2 -v vsdata:/app/omnivoice_data "$IMAGE"
+          docker exec vs python3 -m pip install -q "voxcpm>=2.0.3"
+          docker restart vs
+          python web/video/voicestudio_tts.py || { docker logs --tail 80 vs; exit 1; }
+          docker rm -f vs && docker volume rm vsdata && docker image prune -af >/dev/null
+
       - name: Record on devnet
         env:
           DEVNET_KEYPAIR: ${{ secrets.DEVNET_KEYPAIR }}
           PIPER_MODEL: /home/runner/voices/en_US-lessac-medium.onnx
-        run: python web/video/record.py
+        run: |
+          if [ "${{ steps.voicestudio.outcome }}" != "success" ]; then
+            echo "::warning::VoiceStudio narration failed – falling back to Kokoro"
+            rm -rf web/video/out/voice
+          fi
+          python web/video/record.py
 
       - uses: actions/upload-artifact@v4
         with:

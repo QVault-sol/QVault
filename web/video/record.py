@@ -147,6 +147,16 @@ def synthesize() -> dict[str, float]:
 
     Tries Kokoro first, then Piper; without either the video gets captions only."""
     AUDIO.mkdir(parents=True, exist_ok=True)
+    pre = Path(os.environ.get("VOICE_DIR", HERE / "out" / "voice"))
+    if all((pre / f"{sid}.wav").exists() for sid in NARRATION):
+        print(f"::notice::voice engine: pre-rendered narration from {pre}")
+        durations = {}
+        for sid in NARRATION:
+            dst = AUDIO / f"{sid}.wav"
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(pre / f"{sid}.wav"), "-ac", "1", "-ar", "48000",
+                            "-c:a", "pcm_s16le", str(dst)], check=True)
+            durations[sid] = _wav_seconds(dst)
+        return durations
     say = None
     for name, factory in (("kokoro", _kokoro), ("piper", _piper)):
         try:
