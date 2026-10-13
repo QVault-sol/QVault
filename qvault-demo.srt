@@ -1,0 +1,52 @@
+1
+00:00:00,294 --> 00:00:05,794
+This is QVault: a quantum-safe vault for SOL and SPL tokens on Solana.
+
+2
+00:00:06,421 --> 00:00:17,821
+On Solana, your address is your Ed25519 public key. It is visible to everyone, and a large enough quantum computer could compute the private key behind it.
+
+3
+00:00:18,444 --> 00:00:32,669
+QVault keeps funds in a program account with no private key on chain. It opens only with a Winternitz one-time signature. That is hash-based, built on SHA-256, and verified by our program.
+
+4
+00:00:33,334 --> 00:00:38,884
+Let's try it live on Solana devnet, with the demo wallet that runs in the browser.
+
+5
+00:00:40,762 --> 00:00:47,387
+First, the browser creates a vault from a random recovery code. That code never leaves this device.
+
+6
+00:00:47,739 --> 00:00:51,139
+We deposit some devnet SOL from the normal wallet.
+
+7
+00:00:54,377 --> 00:00:58,902
+And an SPL test token. SOL and tokens sit in the same vault.
+
+8
+00:01:04,548 --> 00:01:22,648
+Now a withdrawal. The browser computes an 840-byte Winternitz signature. It fixes the recipient, the amount, the token and the next vault. The program re-hashes it on chain. Then permissionless steps pay out, and everything else rotates to a fresh vault under a new key.
+
+9
+00:01:24,607 --> 00:01:28,732
+The token works the same way, signed with the next one-time key.
+
+10
+00:01:31,014 --> 00:01:36,414
+Every step is a real devnet transaction, with an explorer link to verify it.
+
+11
+00:01:37,038 --> 00:01:47,363
+Winternitz vaults already exist on Solana, but they hold SOL only. QVault protects SOL, SPL tokens and Token-2022 in one vault.
+
+12
+00:01:47,978 --> 00:02:02,203
+The business model is simple: a zero point one percent fee, only on withdrawals to third parties. Moving funds into your own next vault is free. We start with protocol and DAO treasuries, then wallet integrations.
+
+13
+00:02:02,820 --> 00:02:17,445
+QVault is open source, with attack tests and a devnet pipeline that runs this exact flow in a real browser. It is not audited yet, so it runs on devnet only. An external audit comes before any mainnet launch.
+
