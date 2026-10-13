@@ -118,8 +118,8 @@ def _kokoro():
     import numpy as np
     import soundfile as sf
     from kokoro import KPipeline
-    pipe = KPipeline(lang_code="a")  # American English
-    voice = os.environ.get("KOKORO_VOICE", "af_heart")
+    voice = os.environ.get("KOKORO_VOICE") or "af_heart"
+    pipe = KPipeline(lang_code="b" if voice.startswith("b") else "a")  # British or American English
 
     def say(text: str, path: Path):
         chunks = []
@@ -380,7 +380,9 @@ def mux(video: Path, cues, out: Path):
     if have_audio:
         for sid, _, _ in cues:
             cmd += ["-i", str(AUDIO / f"{sid}.wav")]
-        parts = [f"[{i + 1}:a]aresample=48000,adelay={int(a * 1000)}:all=1[a{i}]" for i, (_, a, _) in enumerate(cues)]
+        # Per line: cut rumble and hiss, light FFT denoise, then a soft fade so no clicks at the edges.
+        parts = [f"[{i + 1}:a]aresample=48000,highpass=f=70,lowpass=f=12500,afftdn=nf=-30:tn=1,"
+                 f"afade=t=in:d=0.02,adelay={int(a * 1000)}:all=1[a{i}]" for i, (_, a, _) in enumerate(cues)]
         mix = ("".join(f"[a{i}]" for i in range(len(cues))) + f"amix=inputs={len(cues)}:normalize=0:duration=longest,"
                "apad,loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
         cmd += ["-filter_complex", ";".join(parts + [mix]), "-map", "0:v", "-map", "[aout]", "-shortest", "-c:a", "aac", "-b:a", "160k"]
